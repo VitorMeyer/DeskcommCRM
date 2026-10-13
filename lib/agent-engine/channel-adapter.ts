@@ -59,7 +59,13 @@ export type ChannelSendResult =
   /** replay pós-crash: já estava aceita, nada reenviado */
   | { kind: 'already_sent'; idempotencyKey: string; messageId: string | null }
   /** canal aceitou e SEGURA (sessão fora do ar) — reagendar, nunca dropar */
-  | { kind: 'queued'; idempotencyKey: string; messageId: string | null }
+  | {
+      kind: 'queued';
+      idempotencyKey: string;
+      messageId: string | null;
+      retryAfterMs?: number;
+      retryable?: boolean;
+    }
   /** veto PERMANENTE de negócio (opt-out/is_blocked, irrevogável — regra dura nº 2) */
   | { kind: 'blocked'; idempotencyKey: string }
   /** o canal registrou a mensagem como falha (retry consome tentativa) */

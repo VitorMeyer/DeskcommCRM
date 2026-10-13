@@ -5,11 +5,12 @@
 // mudar de casa.
 import type { SendMessageInput } from "@/lib/schemas";
 import type { FetchedMedia } from "@/lib/messaging/media/types";
+import type { Localizacao } from "@/lib/messaging/localizacao";
 import type { OutboundMedia } from "@/lib/waha/media-send";
 
 export type { OutboundMedia };
 
-export type ChannelProvider = "waha" | "meta_cloud" | "zernio" | "zernio_social" | "wacalls" | "datafy";
+export type ChannelProvider = "waha" | "meta_cloud" | "zernio" | "zernio_social" | "wacalls" | "datafy" | "uazapi";
 
 /**
  * Os providers que transportam MENSAGEM — o subconjunto sobre o qual a matriz
@@ -129,6 +130,8 @@ export interface OutboundEnvelope extends ChannelTenantScope {
   kind: OutboundKind;
   body?: string;
   media?: OutboundMedia;
+  /** Coordenadas estruturadas — o adapter escolhe o endpoint do transporte. */
+  location?: Localizacao;
   /** Cartão de contato — preenchido quando `kind === "contact"`. */
   contact?: OutboundContact;
   /**
@@ -219,6 +222,24 @@ export interface ChannelAdapter {
    * de `lib/channels/`. Quem chama escreve o que o adapter disser.
    */
   readonly codes: { notConfigured: string; sendFailed: string; unknownError: string };
+
+  /** Erros transitórios que devem ficar visíveis como queued, sem virar falha terminal. */
+  readonly deferredErrors?: readonly {
+    prefix: string;
+    queuedReason: string;
+    /** `manual` deixa a mensagem queued, mas encerra o job; não reenviar em loop. */
+    retryStrategy?: "automatic" | "manual";
+    retryAfterMs?: (errorMessage: string) => number | null;
+    operatorNotice?: {
+      kind: "channel_number_alert";
+      severity: "warn" | "critical";
+      title: string;
+      body: string;
+    };
+  }[];
+
+  /** Ciclo de vida de sessão/QR, quando o provider oferece uma conexão pareada. */
+  sessao?: ChannelSessionOps;
 
   /**
    * URL da foto de perfil do contato, ou null quando não há (sem foto,
@@ -482,6 +503,36 @@ export interface ChannelHealth {
   status: string | null;
   /** Detalhe do erro, para o corpo do aviso. Nunca credencial. */
   detail: string | null;
+}
+
+/**
+ * Estado neutro do ciclo de conexão de um canal pareável.
+ *
+ * QR e código de pareamento pertencem à sessão, não ao transporte de uma
+ * mensagem. Mantê-los aqui permite que a Central reutilize a mesma tela para
+ * qualquer adapter que implemente a porta, sem conhecer fornecedor algum.
+ */
+export interface ChannelSessionStatus {
+  /** Vocabulário de `channel_sessions.status` (STARTING, SCAN_QR_CODE…). */
+  status: string;
+  qrCode: string | null;
+  pairingCode: string | null;
+  phoneNumber: string | null;
+  displayName: string | null;
+}
+
+/** Operações opcionais para canais cujo vínculo é uma sessão pareada. */
+export interface ChannelSessionOps {
+  connect(
+    input: ChannelTenantScope & {
+      sessionRef: string;
+      /** Sem telefone, o provider devolve QR; com telefone, código de pareamento. */
+      phoneNumber?: string | null;
+    },
+  ): Promise<ChannelSessionStatus>;
+  getStatus(input: ChannelTenantScope & { sessionRef: string }): Promise<ChannelSessionStatus>;
+  disconnect(input: ChannelTenantScope & { sessionRef: string }): Promise<void>;
+  delete(input: ChannelTenantScope & { sessionRef: string }): Promise<void>;
 }
 
 /** Definição aprovada, na forma NEUTRA — sem o vocabulário de nenhum provider. */

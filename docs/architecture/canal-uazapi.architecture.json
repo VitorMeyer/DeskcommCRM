@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Canal hospedado Uazapi — estado parcial observado",
+    "subtitle": "Conexão por tenant, envio pelo seam e entrada normalizada; religar sessão, edição inbound e prova viva ainda pendentes",
+    "output": "canal-uazapi.html",
+    "quality_profile": "standard"
+  },
+  "lanes": [
+    { "id": "operacao", "label": "Operação" },
+    { "id": "app", "label": "Aplicação" },
+    { "id": "uazapi", "label": "Uazapi" },
+    { "id": "persistencia", "label": "Persistência" }
+  ],
+  "mainPath": ["conexoes", "sessao-api", "credenciais", "uazapi-api", "webhook", "ingest", "mensagens"],
+  "nodes": [
+    { "id": "conexoes", "lane": "operacao", "col": 0, "type": "ui", "label": "Conexões: cadastrar URL/token, parear e reparar" },
+    { "id": "sessao-api", "lane": "app", "col": 1, "type": "service", "label": "Rotas hospedadas: RBAC/MFA, validação, auditoria" },
+    { "id": "credenciais", "lane": "persistencia", "col": 2, "type": "database", "label": "channel_sessions: credenciais cifradas, org e referência" },
+    { "id": "uazapi-api", "lane": "uazapi", "col": 3, "type": "external", "label": "API remota: status, pareamento, envio e download autenticado" },
+    { "id": "adapter", "lane": "app", "col": 2, "type": "service", "label": "Adapter registrado no seam: JID, texto, mídia, contato e localização" },
+    { "id": "handler-envio", "lane": "app", "col": 1, "type": "service", "label": "Handler comum: guardas, antes do envio, persistência e auditoria" },
+    { "id": "webhook", "lane": "app", "col": 4, "type": "service", "label": "Webhook neutro: token opaco de sessão, arquivo sanitizado" },
+    { "id": "parser", "lane": "app", "col": 5, "type": "service", "label": "Parser: mensagens, ACKs, apagamento, localização e conexão; reação e tipo sem suporte ignorados" },
+    { "id": "ingest", "lane": "app", "col": 6, "type": "service", "label": "Ingest normalizada compartilhada: identidade, dedup, comandos e desfecho (tique único, sem rebaixar)" },
+    { "id": "mensagens", "lane": "persistencia", "col": 7, "type": "database", "label": "messages/conversations: histórico tenant-aware" },
+    { "id": "fila-envio", "lane": "persistencia", "col": 8, "type": "database", "label": "send ledger/job queue: 429 adiado; 463 encerra retry automático" },
+    { "id": "inbox", "lane": "operacao", "col": 9, "type": "ui", "label": "Inbox: histórico e mensagens recebidas" },
+    { "id": "saude", "lane": "app", "col": 5, "type": "service", "label": "Saúde da sessão e aviso acionável da conexão" },
+    { "id": "central", "lane": "operacao", "col": 6, "type": "ui", "label": "Central de avisos e Conexões para reparar" },
+    { "id": "estado-sessao", "lane": "app", "col": 3, "type": "service", "label": "Estado da sessão pareada: número só quando conectada; conflito de número nomeado" },
+    { "id": "pendencias", "lane": "app", "col": 7, "type": "service", "label": "Pendente: religar sessão parada, edição inbound, reação, presença e prova contra a API viva" }
+  ],
+  "edges": [
+    { "from": "conexoes", "to": "sessao-api", "label": "URL/token e escolha de pareamento" },
+    { "from": "sessao-api", "to": "credenciais", "label": "valida organização e persiste credencial cifrada" },
+    { "from": "sessao-api", "to": "uazapi-api", "label": "consulta status e configura webhook" },
+    { "from": "credenciais", "to": "adapter", "label": "resolução por organization_id + instance_id" },
+    { "from": "handler-envio", "to": "adapter", "label": "envelope neutro após guardas comuns" },
+    { "from": "adapter", "to": "uazapi-api", "label": "envio JID e download de mídia" },
+    { "from": "uazapi-api", "to": "handler-envio", "label": "erro 463 manual ou 429 com Retry-After" },
+    { "from": "handler-envio", "to": "fila-envio", "label": "persiste estratégia e prazo de retry" },
+    { "from": "fila-envio", "to": "central", "label": "463 gera aviso deduplicado; 429 reagenda job" },
+    { "from": "uazapi-api", "to": "webhook", "label": "messages / messages_update / connection (presença não é assinada)" },
+    { "from": "webhook", "to": "parser", "label": "sessão resolvida pelo token opaco" },
+    { "from": "parser", "to": "ingest", "label": "mensagem estruturada ou recibo" },
+    { "from": "ingest", "to": "mensagens", "label": "dedup e gravação org-owned" },
+    { "from": "mensagens", "to": "inbox", "label": "Realtime e leitura pelo escopo da organização" },
+    { "from": "inbox", "to": "mensagens", "label": "consulta do histórico" },
+    { "from": "parser", "to": "saude", "label": "transição de conexão" },
+    { "from": "saude", "to": "central", "label": "aviso por episódio; retorno resolve" },
+    { "from": "central", "to": "conexoes", "label": "orientação para reparar a sessão" },
+    { "from": "adapter", "to": "pendencias", "label": "lacunas de retry e operação automática" },
+    { "from": "webhook", "to": "pendencias", "label": "edição inbound sem consumidor: falta payload real capturado" },
+    { "from": "sessao-api", "to": "estado-sessao", "label": "consulta de estado, QR e código de pareamento" },
+    { "from": "estado-sessao", "to": "credenciais", "label": "status, carimbo de mudança e número observado" },
+    { "from": "estado-sessao", "to": "conexoes", "label": "phone_number_conflict: número já ativo em outro canal" },
+    { "from": "parser", "to": "mensagens", "label": "apagar para todos carimba revoked_at; a linha permanece" }
+  ]
+}

@@ -51,7 +51,13 @@ export class WahaChannelAdapter implements ChannelAdapter {
         case 'already_sent':
           return { kind: 'already_sent', idempotencyKey: outcome.idempotencyKey, messageId: outcome.crmMessageId };
         case 'queued':
-          return { kind: 'queued', idempotencyKey: outcome.idempotencyKey, messageId: outcome.crmMessageId };
+          return {
+            kind: 'queued',
+            idempotencyKey: outcome.idempotencyKey,
+            messageId: outcome.crmMessageId,
+            ...(outcome.retryAfterMs !== undefined ? { retryAfterMs: outcome.retryAfterMs } : {}),
+            ...(outcome.retryable === false ? { retryable: false } : {}),
+          };
         case 'blocked':
           return { kind: 'blocked', idempotencyKey: outcome.idempotencyKey };
         case 'failed':

@@ -1,0 +1,21 @@
+{
+  "BaseUrl": "https://example.invalid",
+  "EventType": "messages_update",
+  "event": {
+    "Chat": "15555550100@s.whatsapp.net",
+    "IsFromMe": true,
+    "IsGroup": false,
+    "MessageIDs": ["TEST_PTT_MESSAGE_ID"],
+    "Sender": "test-owner@s.whatsapp.net",
+    "Timestamp": 1790553488,
+    "Type": "Played",
+    "chatid": "15555550100@s.whatsapp.net",
+    "chatlid": "test-lid@lid",
+    "sender_lid": "test-owner-lid@lid",
+    "sender_pn": "test-owner@s.whatsapp.net"
+  },
+  "instanceName": "uazapi-spike",
+  "owner": "test-owner",
+  "state": "Played",
+  "type": "ReadReceipt"
+}

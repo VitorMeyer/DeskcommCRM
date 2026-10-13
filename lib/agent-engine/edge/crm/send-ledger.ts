@@ -8,21 +8,50 @@ export type SendLedgerStatus = "requested" | "accepted" | "queued" | "vetoed" | 
 export type SendOutcome =
   | { kind: "sent"; idempotencyKey: string; crmMessageId: string }
   | {
-      kind: "already_sent" | "queued" | "failed";
+      kind: "already_sent" | "failed";
       idempotencyKey: string;
       crmMessageId: string | null;
+    }
+  | {
+      kind: "queued";
+      idempotencyKey: string;
+      crmMessageId: string | null;
+      retryAfterMs?: number;
+      /** false deixa a mensagem queued, mas encerra este job sem reenviar. */
+      retryable?: boolean;
     }
   | { kind: "blocked"; idempotencyKey: string };
 type Intent = { tenantId: string; leadId: string | null; jobId: string; seq: number; body: string };
 type Row = { id: string; status: SendLedgerStatus; crm_message_id: string | null };
+type LedgerMessage = {
+  id: string;
+  status: string;
+  retryAfterAt?: string | null;
+  retryable?: boolean;
+};
+type MessageRetryRow = {
+  id: string;
+  status: string;
+  retry_after_at: string | null;
+  retry_strategy: string | null;
+};
+function lerMensagemDoLedger(row: MessageRetryRow): LedgerMessage {
+  return {
+    id: row.id,
+    status: row.status,
+    retryAfterAt: row.retry_after_at,
+    retryable: row.retry_strategy !== "manual",
+  };
+}
 interface LedgerStore {
   create(input: Intent, hash: string): Promise<string>;
   find(input: Intent): Promise<Row | null>;
   rotate(input: Intent, hash: string): Promise<string>;
   /** Pela PK primeiro: o envio grava `messages.id = chave` (`internalMessageId`). O
    * `metadata->>'idempotency_key'` não tem índice e só alcança linha gravada antes
-   * dessa convenção, então fica de reserva para quando a PK não acha. */
-  message(org: string, key: string): Promise<{ id: string; status: string } | null>;
+   * dessa convenção, então fica de reserva para quando a PK não acha. Os dois
+   * caminhos devolvem o prazo de nova tentativa que o canal pediu (`retry_after_at`). */
+  message(org: string, key: string): Promise<LedgerMessage | null>;
   update(
     org: string,
     key: string,
@@ -37,7 +66,12 @@ interface LedgerStore {
 export async function sendWithLedger(
   store: LedgerStore,
   input: Intent,
-  send: (key: string, messageId: string) => Promise<{ id: string; status: string }>,
+  send: (key: string, messageId: string) => Promise<{
+    id: string;
+    status: string;
+    retryAfterAt?: string | null;
+    retryable?: boolean;
+  }>,
 ): Promise<SendOutcome> {
   const hash = createHash("sha256").update(input.body).digest("hex");
   let key: string;
@@ -89,9 +123,17 @@ export async function sendWithLedger(
     message.id,
     status === "failed" ? "handler marcou a mensagem como failed" : null,
   );
+  const retryAt = message.retryAfterAt ? Date.parse(message.retryAfterAt) : Number.NaN;
+  const retryAfterMs = Number.isFinite(retryAt) ? Math.max(0, retryAt - Date.now()) : undefined;
   return status === "accepted"
     ? { kind: "sent", idempotencyKey: key, crmMessageId: message.id }
-    : { kind: status, idempotencyKey: key, crmMessageId: message.id };
+    : {
+        kind: status,
+        idempotencyKey: key,
+        crmMessageId: message.id,
+        ...(status === "queued" && retryAfterMs !== undefined ? { retryAfterMs } : {}),
+        ...(status === "queued" && message.retryable === false ? { retryable: false } : {}),
+      };
 }
 /** Reconcilia um recibo já existente sem criar intenção nem chamar o canal.
  * Consumidores determinísticos consultam isto antes dos gates de um NOVO envio. */
@@ -133,16 +175,18 @@ export function pgSendLedger(db: Queryable): LedgerStore {
       return rows[0].id;
     },
     async message(org, key) {
-      const { rows } = await db.query<{ id: string; status: string }>(
-        "select id,status from messages where organization_id=$1 and id=$2",
+      const colunas =
+        "id,status,metadata->>'retry_after_at' as retry_after_at,metadata->>'retry_strategy' as retry_strategy";
+      const { rows } = await db.query<MessageRetryRow>(
+        `select ${colunas} from messages where organization_id=$1 and id=$2`,
         [org, key],
       );
-      if (rows[0]) return rows[0];
-      const legado = await db.query<{ id: string; status: string }>(
-        "select id,status from messages where organization_id=$1 and metadata->>'idempotency_key'=$2 limit 1",
+      if (rows[0]) return lerMensagemDoLedger(rows[0]);
+      const legado = await db.query<MessageRetryRow>(
+        `select ${colunas} from messages where organization_id=$1 and metadata->>'idempotency_key'=$2 limit 1`,
         [org, key],
       );
-      return legado.rows[0] ?? null;
+      return legado.rows[0] ? lerMensagemDoLedger(legado.rows[0]) : null;
     },
     async update(org, key, status, id, error) {
       await db.query(
@@ -200,23 +244,34 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
       return data.id;
     },
     async message(org, key) {
+      const deLinha = (linha: { id: string; status: string; metadata: unknown }) => {
+        const metadata = linha.metadata as Record<string, unknown> | null;
+        return lerMensagemDoLedger({
+          id: linha.id,
+          status: linha.status,
+          retry_after_at:
+            typeof metadata?.retry_after_at === "string" ? metadata.retry_after_at : null,
+          retry_strategy:
+            typeof metadata?.retry_strategy === "string" ? metadata.retry_strategy : null,
+        });
+      };
       const porId = await db
         .from("messages")
-        .select("id,status")
+        .select("id,status,metadata")
         .eq("organization_id", org)
         .eq("id", key)
         .maybeSingle();
       if (porId.error) throw porId.error;
-      if (porId.data) return porId.data;
+      if (porId.data) return deLinha(porId.data);
       const { data, error } = await db
         .from("messages")
-        .select("id,status")
+        .select("id,status,metadata")
         .eq("organization_id", org)
         .eq("metadata->>idempotency_key", key)
         .limit(1)
         .maybeSingle();
       if (error) throw error;
-      return data;
+      return data ? deLinha(data) : null;
     },
     async update(org, key, status, id, errorText) {
       const { error } = await db

@@ -1,0 +1,24 @@
+{
+  "BaseUrl": "https://example.invalid",
+  "EventType": "presence",
+  "event": {
+    "Chat": "15555550100@s.whatsapp.net",
+    "Sender": "15555550100@s.whatsapp.net",
+    "IsFromMe": false,
+    "IsGroup": false,
+    "AddressingMode": "",
+    "SenderAlt": "",
+    "RecipientAlt": "",
+    "BroadcastListOwner": "",
+    "BroadcastRecipients": null,
+    "State": "composing",
+    "Media": "",
+    "chatid": "15555550100@s.whatsapp.net",
+    "chatlid": "test-lid@lid",
+    "sender_pn": "15555550100@s.whatsapp.net",
+    "sender_lid": "test-lid@lid"
+  },
+  "instanceName": "uazapi-spike",
+  "owner": "test-owner",
+  "type": "presence"
+}

@@ -86,9 +86,31 @@ export async function ingestZernioInbound(
 ): Promise<ZernioIngestResult> {
   const lida = input.socialMessage ?? parseZernioInbound(input.payload);
   if (!lida) return { status: "ignored", reason: "evento_sem_interesse" };
+  return ingestNormalizedInbound(admin, {
+    organizationId: input.organizationId,
+    channelSessionId: input.channelSessionId,
+    message: lida,
+    socialMessage: input.socialMessage,
+  });
+}
+
+/** Processa mensagens já normalizadas, compartilhando dedup e efeitos de entrada entre canais. */
+export async function ingestNormalizedInbound(
+  admin: SupabaseClient,
+  input: {
+    organizationId: string;
+    channelSessionId: string;
+    message: ZernioInboundMessage;
+    socialMessage?: SocialMessage;
+    source?: { label: string; origin: string; channel: string };
+  },
+): Promise<ZernioIngestResult> {
+  const source = input.source ?? { label: "zernio", origin: "zernio_webhook", channel: "zernio" };
   // O pino do WhatsApp chega como "📍 Location", sem coordenadas: elas moram
   // só na API. Rede social não manda pino — a busca é só do WhatsApp.
-  const msg = input.socialMessage ? lida : await completarLocalizacao(admin, input.organizationId, lida);
+  const msg = input.socialMessage
+    ? input.message
+    : await completarLocalizacao(admin, input.organizationId, input.message);
 
   // Evento de DESFECHO: a mensagem já existe (ou nem é nossa). Só atualiza o
   // status — inserir aqui criaria uma segunda linha para a mesma mensagem, uma
@@ -98,7 +120,9 @@ export async function ingestZernioInbound(
       .from("messages")
       .update({
         status: msg.status,
-        ...(msg.errorReason ? { error_message: msg.errorReason, error_code: "zernio_error" } : {}),
+        ...(msg.errorReason
+          ? { error_message: msg.errorReason, error_code: `${source.channel}_error` }
+          : {}),
       })
       .eq("organization_id", input.organizationId)
       .eq("channel_session_id", input.channelSessionId)
@@ -194,13 +218,14 @@ export async function ingestZernioInbound(
         .is("phone_number", null);
     }
     if (inseridaNaExistente !== "duplicate") {
-      await marcarConversa(admin, input.organizationId, existente.id, msg);
+      await marcarConversa(admin, input.organizationId, existente.id, msg, source.channel);
       if (msg.attachments[0]?.url) {
         await pedirPersistenciaDaMidia(
           admin,
           input.organizationId,
           existente.id,
           inseridaNaExistente,
+          source.label,
         );
       }
       if (!input.socialMessage && pinoFicouSemCoordenadas(msg)) {
@@ -208,7 +233,7 @@ export async function ingestZernioInbound(
       }
       await efeitosDaEntrada(
         admin,
-        input,
+        { ...input, source },
         msg,
         existente.contact_id,
         existente.id,
@@ -218,7 +243,7 @@ export async function ingestZernioInbound(
         await pausarIaPorAtendimentoManual(admin, {
           organizationId: input.organizationId,
           conversationId: existente.id,
-          canal: "zernio",
+          canal: source.channel,
         });
       }
     }
@@ -252,11 +277,14 @@ export async function ingestZernioInbound(
     // Mesma guarda do ramo acima: sem ela, rede nova = 23514 reentregue para
     // sempre. Ver `lib/channels/canais-de-conversa.ts`.
     if (!ehCanalDeConversa(input.socialMessage.platform)) {
-      logger.error("zernio: rede sem canal correspondente no banco — conversa não atualizada", {
-        organization_id: input.organizationId,
-        platform: input.socialMessage.platform,
-        detalhe: "falta o valor no CHECK de conversations.channel (migration)",
-      });
+      logger.error(
+        `${source.label}: rede sem canal correspondente no banco — conversa não atualizada`,
+        {
+          organization_id: input.organizationId,
+          platform: input.socialMessage.platform,
+          detalhe: "falta o valor no CHECK de conversations.channel (migration)",
+        },
+      );
       return { status: "ignored", reason: "canal_desconhecido" };
     }
     const { error } = await admin
@@ -277,14 +305,20 @@ export async function ingestZernioInbound(
 
   if (inserted === "duplicate") return { status: "duplicate", conversationId };
 
-  await marcarConversa(admin, input.organizationId, conversationId, msg);
+  await marcarConversa(admin, input.organizationId, conversationId, msg, source.channel);
   if (msg.attachments[0]?.url) {
-    await pedirPersistenciaDaMidia(admin, input.organizationId, conversationId, inserted);
+    await pedirPersistenciaDaMidia(
+      admin,
+      input.organizationId,
+      conversationId,
+      inserted,
+      source.label,
+    );
   }
   if (!input.socialMessage && pinoFicouSemCoordenadas(msg)) {
     await pedirNovaBuscaDoPino(admin, input.organizationId, inserted, msg);
   }
-  await efeitosDaEntrada(admin, input, msg, contactId, conversationId, inserted);
+  await efeitosDaEntrada(admin, { ...input, source }, msg, contactId, conversationId, inserted);
 
   // SAÍDA feita por fora do CRM = uma pessoa respondeu o cliente à mão (celular,
   // outra plataforma na mesma conta). A IA para nesta conversa. O eco do nosso
@@ -293,7 +327,7 @@ export async function ingestZernioInbound(
     await pausarIaPorAtendimentoManual(admin, {
       organizationId: input.organizationId,
       conversationId,
-      canal: "zernio",
+      canal: source.channel,
     });
   }
 
@@ -322,6 +356,7 @@ async function efeitosDaEntrada(
     channelSessionId: string;
     requestId?: string;
     socialMessage?: Pick<SocialMessage, "platform">;
+    source: { label: string; origin: string; channel: string };
   },
   msg: ZernioInboundMessage,
   contactId: string,
@@ -351,7 +386,7 @@ async function efeitosDaEntrada(
     texto: msg.text,
     nomeDoContato: msg.identity.displayName,
     requestId: input.requestId,
-    origem: "zernio_webhook",
+    origem: input.source.origin,
     // A rede é o canal que os dois ramos acima já gravaram em
     // `conversations.channel`; sem ela o negócio nasce como WhatsApp.
     canal: input.socialMessage?.platform,
@@ -392,6 +427,7 @@ async function marcarConversa(
   organizationId: string,
   conversationId: string,
   msg: ZernioInboundMessage,
+  channel = "zernio",
 ): Promise<void> {
   await marcarConversaComMensagem(admin, {
     organizationId,
@@ -402,9 +438,8 @@ async function marcarConversa(
     // têm que usar a hora em que o cliente ESCREVEU, não a hora em que o webhook
     // chegou — numa reentrega atrasada as duas diferem por horas.
     at: msg.sentAt ?? new Date().toISOString(),
-    canal: "zernio",
+    canal: channel,
   });
-
 }
 
 /**
@@ -423,6 +458,7 @@ async function pedirPersistenciaDaMidia(
   organizationId: string,
   conversationId: string,
   messageId: string,
+  sourceLabel = "zernio",
 ): Promise<void> {
   const { error } = await admin.rpc(
     "emit_event" as never,
@@ -436,7 +472,7 @@ async function pedirPersistenciaDaMidia(
     } as never,
   );
   if (error) {
-    logger.warn("[zernio] emit media.persist_requested falhou", {
+    logger.warn(`[${sourceLabel}] emit media.persist_requested falhou`, {
       messageId,
       detail: error.message,
     });

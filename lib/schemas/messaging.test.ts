@@ -69,6 +69,25 @@ describe("sendMessageSchema", () => {
     expect(r.success).toBe(true);
   });
 
+  it("aceita localização apenas com coordenadas válidas e rejeita pino fora da Terra", () => {
+    const base = {
+      conversation_id: "11111111-1111-4111-8111-111111111111",
+      type: "location",
+    };
+    expect(
+      sendMessageSchema.safeParse({
+        ...base,
+        metadata: { location: { latitude: -23.55, longitude: -46.63 } },
+      }).success,
+    ).toBe(true);
+    expect(
+      sendMessageSchema.safeParse({
+        ...base,
+        metadata: { location: { latitude: 120, longitude: -46.63 } },
+      }).success,
+    ).toBe(false);
+  });
+
   it("rejeita body acima do limite de 4096", () => {
     const r = sendMessageSchema.safeParse({
       conversation_id: "11111111-1111-4111-8111-111111111111",

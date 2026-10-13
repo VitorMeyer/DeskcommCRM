@@ -1,0 +1,33 @@
+{
+  "BaseUrl": "https://example.invalid",
+  "EventType": "messages",
+  "chatSource": "updated",
+  "instanceName": "uazapi-spike",
+  "message": {
+    "chatid": "15555550100@s.whatsapp.net",
+    "chatlid": "test-lid@lid",
+    "content": {
+      "URL": "https://example.invalid/media.enc",
+      "mimetype": "audio/ogg; codecs=opus",
+      "fileLength": 295612,
+      "seconds": 121,
+      "PTT": true
+    },
+    "fromMe": false,
+    "id": "test-owner:TEST_PTT_MESSAGE_ID",
+    "isGroup": false,
+    "mediaType": "ptt",
+    "messageTimestamp": 1790553464000,
+    "messageType": "AudioMessage",
+    "messageid": "TEST_PTT_MESSAGE_ID",
+    "owner": "test-owner",
+    "sender": "test-lid@lid",
+    "sender_lid": "test-lid@lid",
+    "sender_pn": "15555550100@s.whatsapp.net",
+    "source": "ios",
+    "text": "",
+    "type": "media",
+    "wasSentByApi": false
+  },
+  "owner": "test-owner"
+}

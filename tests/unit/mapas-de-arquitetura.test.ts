@@ -167,6 +167,18 @@ describe("mapas de arquitetura — coerência interna", () => {
     ).toContain("telaauditoria");
   });
 
+  it("canal Uazapi liga configuração, transporte, entrada e saída visíveis", () => {
+    const m = JSON.parse(
+      fs.readFileSync(path.join(DIR, "canal-uazapi.architecture.json"), "utf8"),
+    ) as Mapa;
+    const grau = (id: string) =>
+      (m.edges ?? []).filter((e) => e.from === id || e.to === id).length;
+    for (const peca of ["conexoes", "sessao-api", "adapter", "webhook", "ingest", "mensagens", "central"]) {
+      expect(grau(peca), `${peca} com menos de 2 arestas`).toBeGreaterThanOrEqual(2);
+    }
+    expect((m.edges ?? []).some((e) => e.from === "central" && e.to === "conexoes")).toBe(true);
+  });
+
   it("o índice de atrito está no mapa, e com mais de duas arestas", () => {
     // O caso concreto do DoD 13 para o trabalho desta branch. Genérico demais
     // não guardaria nada: "algum mapa existe" é verdade desde sempre.

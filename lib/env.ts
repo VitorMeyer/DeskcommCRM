@@ -275,6 +275,11 @@ const schema = z.object({
   // é `canalGraphParceiroLigado()` em `lib/channels/graph-parceiro/credentials.ts`.
   DATAFY_ENABLED: z.string().optional().default(""),
 
+  // ─── Canal hospedado por instância — OPCIONAL, DESLIGADO POR PADRÃO ───
+  // Cada organização cola URL e token na própria conexão cifrada. O ambiente
+  // só autoriza que a instalação ofereça essa opção, nunca carrega credencial.
+  UAZAPI_ENABLED: z.string().optional().default(""),
+
   // Upstash Redis
   UPSTASH_REDIS_REST_URL: required("UPSTASH_REDIS_REST_URL"),
   UPSTASH_REDIS_REST_TOKEN: required("UPSTASH_REDIS_REST_TOKEN"),

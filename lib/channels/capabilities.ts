@@ -110,6 +110,20 @@ export const CHANNEL_CAPABILITIES: Record<ProviderDeMensagem, ChannelCapabilitie
     costPerMessage: true,
     alteraMensagemEnviada: false,
   },
+  // Sessão não-oficial hospedada pelo provedor: o WhatsApp pode limitar ou
+  // banir por padrão de uso, então preserva a mesma proteção de ritmo, warm-up
+  // e teto diário do canal pareado localmente.
+  uazapi: {
+    freeformOutsideWindow: true,
+    requiresTemplates: false,
+    canManageTemplates: false,
+    banRisk: true,
+    minIntervalMs: null,
+    voiceNote: "server-convert",
+    groups: "full",
+    costPerMessage: false,
+    alteraMensagemEnviada: true,
+  },
 };
 
 /**
@@ -134,6 +148,8 @@ export const CHANNEL_PROVIDER_SOCIAL: ChannelProvider = "zernio_social";
 export const CHANNEL_PROVIDER_ZERNIO: ChannelProvider = "zernio";
 /** Parceiro que espelha a Cloud API — canal opcional da instalação, desligado por padrão. */
 export const CHANNEL_PROVIDER_DATAFY: ChannelProvider = "datafy";
+/** Sessão WhatsApp hospedada pelo provedor, opcional por instalação. */
+export const CHANNEL_PROVIDER_UAZAPI: ChannelProvider = "uazapi";
 /** Chamada de voz WhatsApp (spec 18). Não transporta mensagem — ver abaixo. */
 export const CHANNEL_PROVIDER_WACALLS: ChannelProvider = "wacalls";
 
@@ -158,6 +174,7 @@ export const PROVIDERS_DE_MENSAGEM = [
   "zernio",
   "zernio_social",
   "datafy",
+  "uazapi",
 ] as const satisfies readonly ProviderDeMensagem[];
 
 /**

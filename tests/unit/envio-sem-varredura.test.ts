@@ -99,19 +99,50 @@ describe("sendWithLedger só procura a mensagem no replay", () => {
 });
 
 describe("store.message busca pela PK e só cai no metadata se a PK não achar", () => {
-  it("pg: achou pela PK → uma query só, sem metadata", async () => {
-    const db = fakeDb([[{ id: "k", status: "sent" }]]);
-    expect(await pgSendLedger(db).message("org", "k")).toEqual({ id: "k", status: "sent" });
+  // O que custa é FILTRAR por `metadata` (sem índice); ler campos dela na linha
+  // que a PK já achou é de graça. Por isto a asserção olha só o `where`.
+  const filtro = (sql: string | undefined) => (sql ?? "").split(/\bwhere\b/i)[1] ?? "";
+  const semPrazo = { retry_after_at: null, retry_strategy: null };
+
+  it("pg: achou pela PK → uma query só, sem filtrar por metadata", async () => {
+    const db = fakeDb([[{ id: "k", status: "sent", ...semPrazo }]]);
+    expect(await pgSendLedger(db).message("org", "k")).toEqual({
+      id: "k",
+      status: "sent",
+      retryAfterAt: null,
+      retryable: true,
+    });
     expect(db.sqls).toHaveLength(1);
-    expect(db.sqls[0]).toMatch(/\bid=\$2/);
-    expect(db.sqls[0]).not.toContain("metadata");
+    expect(filtro(db.sqls[0])).toMatch(/\bid=\$2/);
+    expect(filtro(db.sqls[0])).not.toContain("metadata");
     expect(db.params[0]).toEqual(["org", "k"]);
   });
 
   it("pg: PK vazia → reserva pelo metadata (linha anterior à convenção)", async () => {
-    const db = fakeDb([[], [{ id: "antiga", status: "queued" }]]);
-    expect(await pgSendLedger(db).message("org", "k")).toEqual({ id: "antiga", status: "queued" });
-    expect(db.sqls[1]).toContain("metadata->>'idempotency_key'");
+    const db = fakeDb([[], [{ id: "antiga", status: "queued", ...semPrazo }]]);
+    expect(await pgSendLedger(db).message("org", "k")).toEqual({
+      id: "antiga",
+      status: "queued",
+      retryAfterAt: null,
+      retryable: true,
+    });
+    expect(filtro(db.sqls[1])).toContain("metadata->>'idempotency_key'");
+  });
+
+  // O replay acha a mensagem pela PK; se esse caminho perdesse o prazo que o
+  // canal pediu (429 com Retry-After, bloqueio temporário com aviso manual), o
+  // job reenviaria antes da hora ou reenviaria o que só uma pessoa pode liberar.
+  it("pg: achou pela PK → devolve o prazo de nova tentativa e a estratégia", async () => {
+    const db = fakeDb([
+      [{ id: "k", status: "queued", retry_after_at: "2026-10-07T12:00:00Z", retry_strategy: "manual" }],
+    ]);
+    expect(await pgSendLedger(db).message("org", "k")).toEqual({
+      id: "k",
+      status: "queued",
+      retryAfterAt: "2026-10-07T12:00:00Z",
+      retryable: false,
+    });
+    expect(db.sqls).toHaveLength(1);
   });
 
   it("supabase: achou pela PK → não consulta metadata", async () => {
@@ -129,8 +160,36 @@ describe("store.message busca pela PK e só cai no metadata se a PK não achar",
       return q;
     });
     const sb = { from } as unknown as SupabaseClient;
-    expect(await supabaseSendLedger(sb).message("org", "k")).toEqual({ id: "k", status: "sent" });
+    expect(await supabaseSendLedger(sb).message("org", "k")).toEqual({
+      id: "k",
+      status: "sent",
+      retryAfterAt: null,
+      retryable: true,
+    });
     expect(filtros).toEqual([[["organization_id", "org"], ["id", "k"]]]);
+  });
+
+  it("supabase: achou pela PK → devolve o prazo de nova tentativa e a estratégia", async () => {
+    const q = {
+      select: () => q,
+      eq: () => q,
+      limit: () => q,
+      maybeSingle: async () => ({
+        data: {
+          id: "k",
+          status: "queued",
+          metadata: { retry_after_at: "2026-10-07T12:00:00Z", retry_strategy: "manual" },
+        },
+        error: null,
+      }),
+    };
+    const sb = { from: vi.fn(() => q) } as unknown as SupabaseClient;
+    expect(await supabaseSendLedger(sb).message("org", "k")).toEqual({
+      id: "k",
+      status: "queued",
+      retryAfterAt: "2026-10-07T12:00:00Z",
+      retryable: false,
+    });
   });
 });
 

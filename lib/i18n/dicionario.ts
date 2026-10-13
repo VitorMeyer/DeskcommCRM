@@ -15454,6 +15454,22 @@ export const DICIONARIO: Traducoes = {
   "Nenhum negócio com este campo de data neste período.": {
     es: "Ningún negocio con este campo de fecha en este período.",
   },
+  // Conexão por sessão hospedada (Central de Conexões)
+  "Servidor validado e conexão salva.": { es: "Servidor validado y conexión guardada." },
+  "Número desconectado.": { es: "Número desconectado." },
+  "Estado da conexão atualizado.": { es: "Estado de la conexión actualizado." },
+  "Cole a URL e o token de uma instância já criada no painel do serviço. O token é validado antes de ser cifrado e salvo nesta organização.": { es: "Pega la URL y el token de una instancia ya creada en el panel del servicio. El token se valida antes de cifrarse y guardarse en esta organización." },
+  "Número ainda não pareado": { es: "Número aún no vinculado" },
+  "URL do servidor": { es: "URL del servidor" },
+  "Token da instância": { es: "Token de la instancia" },
+  "gravado — preencha para atualizar": { es: "guardado — completa para actualizar" },
+  "Cole o token": { es: "Pega el token" },
+  "Atualizar conexão": { es: "Actualizar conexión" },
+  "Gerar QR Code": { es: "Generar código QR" },
+  "Remover conexão": { es: "Eliminar conexión" },
+  "QR Code para conectar o WhatsApp": { es: "Código QR para conectar WhatsApp" },
+  "Gere o QR Code para iniciar o pareamento.": { es: "Genera el código QR para iniciar la vinculación." },
+  "Este número já está conectado em outro canal ativo desta organização. Remova o outro canal para usá-lo aqui.": { es: "Este número ya está conectado en otro canal activo de esta organización. Elimina el otro canal para usarlo aquí." },
 };
 
 /**

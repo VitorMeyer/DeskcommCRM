@@ -4676,6 +4676,40 @@ async function executarTurnoDoAgente(
       }
     }
 
+    const enviosNaFila = outcomes.filter((outcome) => outcome.kind === 'queued');
+    if (enviosNaFila.length > 0) {
+      const todosPodemTentar = enviosNaFila.every((outcome) => outcome.retryable !== false);
+      const delayMs = todosPodemTentar
+        ? Math.max(
+            deps.knobs.queuedRetryDelayMs,
+            ...enviosNaFila.map((outcome) => outcome.retryAfterMs ?? 0),
+          )
+        : undefined;
+      const fila = {
+        kind: 'queued' as const,
+        idempotencyKey: enviosNaFila[0]!.idempotencyKey,
+        crmMessageId: enviosNaFila[0]!.messageId,
+        ...(todosPodemTentar ? { retryAfterMs: delayMs } : { retryable: false }),
+      };
+      await applySendOutcome(
+        pool,
+        fila,
+        {
+          jobId: liveJob().id,
+          workerId: ctx.workerId,
+          tenantId,
+          leadId,
+          jobClaim: claimOfJob(liveJob()),
+        },
+        { queuedRetryDelayMs: deps.knobs.queuedRetryDelayMs },
+      );
+      throw new JobSettledError(
+        todosPodemTentar
+          ? 'mensagem queued — job reagendado sem consumir attempts'
+          : 'mensagem queued exige ação humana — job encerrado sem reenvio automático',
+      );
+    }
+
     if (runError !== null) {
       throw runError; // job falha → retry da fila; o ledger segura duplicata de envio
     }

@@ -46,6 +46,7 @@ import { conferirDefinicao } from "@/lib/channels/conferir-definicao";
 import { estadoDaJanela } from "@/lib/channels/janela";
 import { isMediaPathOwnedBy } from "@/lib/messaging/media/upload-validation";
 import { assertUrlDeMidiaSegura } from "@/lib/messaging/media/url-de-midia-externa";
+import { corpoDaLocalizacao, lerLocalizacao } from "@/lib/messaging/localizacao";
 import {
   buildVcard,
   normalizePhoneForDisplay,
@@ -56,6 +57,7 @@ import type { ListMessagesQuery, SendMessageInput } from "@/lib/schemas";
 import { sendTemplateForSession } from "@/lib/channels/meta/send-template-for-session";
 import { emitirFalhaDeEntrega } from "@/lib/messaging/falha-de-entrega";
 import { aplicarAssinatura, configAssinatura, linhaDeAssinatura } from "@/lib/messaging/assinatura";
+import { registrarAvisoDeEnvioAdiado } from "@/lib/channels/registrar-aviso-envio-adiado";
 import { nomeDoContato } from "@/lib/contacts/rotulo-do-contato";
 import { nomesDosAtendentes } from "@/lib/users/nome-do-atendente";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -665,6 +667,21 @@ export async function sendMessageHandler(
   const corpoDoCanal = (texto: string | null): string | null =>
     aplicarAssinatura(assinatura, texto) ?? null;
 
+  if (input.type === "location") {
+    const location = lerLocalizacao(outboundMetadata.location);
+    if (!location) {
+      throw new ApiError(
+        422,
+        "invalid_payload",
+        undefined,
+        ctx.requestId,
+        traduzir("Informe latitude e longitude válidas para a localização.", ctx.idioma ?? "pt-BR"),
+      );
+    }
+    outboundMetadata = { ...outboundMetadata, location };
+    outboundBody = corpoDaLocalizacao(location);
+  }
+
   if (input.type === "contact") {
     const sharedId = input.metadata?.shared_contact_id;
     const inline = input.metadata?.shared_contact;
@@ -1175,6 +1192,21 @@ export async function sendMessageHandler(
             vcard: buildVcard(nome, telefone),
           },
         }));
+      } else if (input.type === "location") {
+        const location = lerLocalizacao(outboundMetadata.location);
+        if (!location) throw new Error("location_payload_missing");
+        await checkBoundary();
+        ({ externalId } = await adapter.send({
+          beforeSend: checkBoundary,
+          organizationId: ctx.organization_id,
+          sessionRef: resolveSessionRef(c.channel_sessions),
+          to: chatId,
+          providerConversationId: c.provider_conversation_id,
+          kind: "location",
+          body: outboundBody ?? corpoDaLocalizacao(location),
+          location,
+          replyToExternalId: citada?.external_id ?? null,
+        }));
       } else {
         await checkBoundary();
         ({ externalId } = await adapter.send({
@@ -1288,6 +1320,58 @@ export async function sendMessageHandler(
           .select(MSG_COLS)
           .maybeSingle();
         if (emFila) message = emFila as unknown as Message;
+        return message;
+      }
+
+      const deferred = adapter.deferredErrors?.find((candidate) =>
+        msg.startsWith(candidate.prefix),
+      );
+      if (deferred) {
+        const retryAfterMs = deferred.retryAfterMs?.(msg) ?? null;
+        const { data: emFila, error: filaError } = await supabase
+          .from("messages")
+          .update({
+            status: "queued",
+            error_code: code,
+            error_message: msg,
+            metadata: {
+              ...(message.metadata ?? {}),
+              queued_reason: deferred.queuedReason,
+              retry_strategy: deferred.retryStrategy ?? "automatic",
+              retry_after_at:
+                retryAfterMs === null
+                  ? null
+                  : new Date(Date.now() + retryAfterMs).toISOString(),
+            },
+          })
+          .eq("id", message.id)
+          .select(MSG_COLS)
+          .maybeSingle();
+        if (filaError || !emFila) {
+          throw new ApiError(
+            500,
+            "internal_error",
+            undefined,
+            ctx.requestId,
+            "Não foi possível registrar o reagendamento do envio.",
+          );
+        }
+        message = emFila as unknown as Message;
+        if (deferred.operatorNotice && c.channel_session_id) {
+          try {
+            await registrarAvisoDeEnvioAdiado(createAdminClient(), {
+              organizationId: ctx.organization_id,
+              channelSessionId: c.channel_session_id,
+              aviso: deferred.operatorNotice,
+            });
+          } catch (noticeError) {
+            logger.warn("Não foi possível abrir o aviso do envio adiado na Central.", {
+              organization_id: ctx.organization_id,
+              channel_session_id: c.channel_session_id,
+              error: noticeError instanceof Error ? noticeError.message : "unknown_error",
+            });
+          }
+        }
         return message;
       }
 

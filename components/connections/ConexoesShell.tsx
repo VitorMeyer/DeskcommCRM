@@ -5,6 +5,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 import { RedesSociaisClient } from "./RedesSociaisClient";
 import { CanalGraphParceiroClient } from "./CanalGraphParceiroClient";
+import { CanalSessaoHospedadaClient } from "./CanalSessaoHospedadaClient";
 import { CanalOficialClient } from "./CanalOficialClient";
 import { CanalParceiroClient } from "./CanalParceiroClient";
 import { CanalVozClient } from "./CanalVozClient";
@@ -42,6 +43,7 @@ export function ConexoesShell({
   wahaConfigured,
   wacallsConfigured,
   graphParceiro = null,
+  canalHospedado = null,
 }: {
   wahaConfigured: boolean;
   wacallsConfigured: boolean;
@@ -52,6 +54,7 @@ export function ConexoesShell({
    * O rótulo vem do servidor porque a tela não pode nomear provider.
    */
   graphParceiro?: { label: string } | null;
+  canalHospedado?: { label: string } | null;
 }) {
   const t = useT();
   const router = useRouter();
@@ -70,7 +73,9 @@ export function ConexoesShell({
             ? "voz"
             : abaParam === "graph" && graphParceiro
               ? "graph"
-              : "numeros";
+              : abaParam === "sessao" && canalHospedado
+                ? "sessao"
+                : "numeros";
   const sub = params.get("sub") === "templates" ? "templates" : "conexao";
 
   const irPara = (proximaAba: string, proximaSub?: string): void => {
@@ -107,6 +112,7 @@ export function ConexoesShell({
         <TabsTrigger value="sociais">{t("Redes sociais")}</TabsTrigger>
         <TabsTrigger value="voz">{t("Chamada de voz")}</TabsTrigger>
         {graphParceiro && <TabsTrigger value="graph">{graphParceiro.label}</TabsTrigger>}
+        {canalHospedado && <TabsTrigger value="sessao">{canalHospedado.label}</TabsTrigger>}
       </TabsList>
 
       <TabsContent value="numeros" className="mt-0">
@@ -143,6 +149,12 @@ export function ConexoesShell({
               <TemplatesParceiroClient rota={rotaDeTemplates("graph")} />
             </TabsContent>
           </Tabs>
+        </TabsContent>
+      )}
+
+      {canalHospedado && (
+        <TabsContent value="sessao" className="mt-0">
+          <CanalSessaoHospedadaClient label={canalHospedado.label} />
         </TabsContent>
       )}
 

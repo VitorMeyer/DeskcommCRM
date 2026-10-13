@@ -51,6 +51,7 @@ de menor precedência e registre.
 | [`prd/04-prd-pipeline-attendance.md`](prd/04-prd-pipeline-attendance.md) | Kanban, atendimento, tickets, handoff |
 | [`prd/05-prd-ai-rag-handoff.md`](prd/05-prd-ai-rag-handoff.md) | IA conversacional, RAG por tenant, sentiment |
 | [`prd/06-prd-nuvemshop-lgpd.md`](prd/06-prd-nuvemshop-lgpd.md) | Integração Nuvemshop + webhooks LGPD |
+| [`prd/07-prd-uazapi-canal.md`](prd/07-prd-uazapi-canal.md) | Canal WhatsApp hospedado por instância (uazapi): escopo, contrato conferido, estado e decisões em aberto |
 | [`business-rules/00-business-rules-catalog.md`](business-rules/00-business-rules-catalog.md) | **Catálogo de regras de negócio** — fonte da verdade fora do código |
 | [`presentation/pitch-deck.md`](presentation/pitch-deck.md) | Pitch |
 

@@ -20,7 +20,9 @@ import { CHANNEL_PROVIDER_SOCIAL } from "./capabilities";
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { CHANNEL_PROVIDER_DATAFY, CHANNEL_PROVIDER_ZERNIO } from "./capabilities";
+import { CHANNEL_PROVIDER_DATAFY, CHANNEL_PROVIDER_UAZAPI, CHANNEL_PROVIDER_ZERNIO } from "./capabilities";
+import { canalUazapiLigado } from "./uazapi/credentials";
+import { lerEnvelopeUazapi, mensagemDeDesfecho } from "./uazapi/envelope";
 import { canalGraphParceiroLigado } from "./graph-parceiro/credentials";
 import { graphPartnerRefsDaSessao } from "./graph-parceiro/session";
 import {
@@ -39,7 +41,7 @@ import {
   registrarAviso,
   saudeDoEvento,
 } from "./zernio/avisos";
-import { aplicarEdicaoZernio, ingestZernioInbound } from "./zernio/ingest";
+import { aplicarEdicaoZernio, ingestNormalizedInbound, ingestZernioInbound } from "./zernio/ingest";
 import { lerEnvelopeZernio } from "./zernio/envelope";
 import { parseZernioEdicao, verifyZernioSignature } from "./zernio/webhook";
 import type { ChannelProvider } from "./types";
@@ -86,12 +88,51 @@ export function acceptsInboundWebhook(provider: string): boolean {
   // O canal Datafy é opcional da instalação: desligado, a entrada dele não
   // existe — nem para quem tem o token de uma sessão gravada antes.
   if (provider === CHANNEL_PROVIDER_DATAFY) return canalGraphParceiroLigado();
+  if (provider === CHANNEL_PROVIDER_UAZAPI) return canalUazapiLigado();
   return provider === CHANNEL_PROVIDER_ZERNIO || provider === CHANNEL_PROVIDER_SOCIAL;
+}
+
+const CHAVE_DE_SEGREDO = /^(token|admintoken|access_?token|api_?key|secret|password)$/i;
+
+/**
+ * Remove segredos que certos provedores repetem dentro do JSON do evento.
+ *
+ * Este canal não assina o corpo: a credencial da instância viaja em claro, como
+ * campo, e o arquivo de webhooks guarda o corpo cru para reprocessar. Sem esta
+ * passagem o token ficaria legível em `webhook_events_log` para quem lê o
+ * arquivo — e ele abre a instância inteira, não só o evento.
+ *
+ * Corpo que não é JSON também passa: é justamente o caso que o arquivo quer
+ * guardar, e "não consegui ler" não pode virar "gravei como veio".
+ */
+export function corpoSeguroParaArquivoWebhook(provider: string, rawBody: string): string {
+  if (provider !== CHANNEL_PROVIDER_UAZAPI) return rawBody;
+  try {
+    const value = JSON.parse(rawBody) as unknown;
+    const sanitizar = (entrada: unknown): unknown => {
+      if (Array.isArray(entrada)) return entrada.map(sanitizar);
+      if (!entrada || typeof entrada !== "object") return entrada;
+      return Object.fromEntries(
+        Object.entries(entrada as Record<string, unknown>)
+          .filter(([key]) => !CHAVE_DE_SEGREDO.test(key))
+          .map(([key, child]) => [key, sanitizar(child)]),
+      );
+    };
+    return JSON.stringify(sanitizar(value));
+  } catch {
+    return rawBody.replace(
+      /("(?:token|admintoken|access_?token|api_?key|secret|password)"\s*:\s*")[^"]*"/gi,
+      '$1[removido]"',
+    );
+  }
 }
 
 /** Authenticate before archiving raw payloads. The handler repeats this guard for non-HTTP callers. */
 export function verifyInboundWebhookSignature(provider: string, raw: string, headers: Headers, secret: string | null): boolean {
   if (!acceptsInboundWebhook(provider) || !secret || secret.length < MIN_SECRET_LEN) return false;
+  // Para este transporte, o segredo é o token aleatório do caminho que já
+  // resolveu a sessão. O serviço não assina o corpo com HMAC.
+  if (provider === CHANNEL_PROVIDER_UAZAPI) return true;
   // Cada canal assina do seu jeito; o esquema do Datafy está em `graph-parceiro/webhook`.
   if (provider === CHANNEL_PROVIDER_DATAFY) {
     return verifyGraphPartnerSignature(raw, headers.get(HEADER_ASSINATURA), headers.get(HEADER_TIMESTAMP), secret);
@@ -194,11 +235,96 @@ export async function handleInboundWebhook(
       return zernioInbound(admin, input);
     case CHANNEL_PROVIDER_DATAFY:
       return datafyInbound(admin, input);
+    case CHANNEL_PROVIDER_UAZAPI:
+      return uazapiInbound(admin, input);
     default:
       // Token de um canal que não entra por aqui. É configuração trocada, não
       // ataque — mas processar seria ler o payload com o parser errado.
       return { ok: false, code: "provider_mismatch", message: "canal não recebe por esta rota" };
   }
+}
+
+/** Eventos da instância hospedada: credencial do caminho resolve a sessão. */
+async function uazapiInbound(
+  admin: SupabaseClient,
+  input: InboundWebhookInput,
+): Promise<InboundWebhookOutcome> {
+  const leitura = lerEnvelopeUazapi(input.rawBody);
+  if (!leitura.ok) {
+    return leitura.reason === "invalid_json"
+      ? { ok: false, code: "invalid_json", message: "invalid_json" }
+      : { ok: false, code: "contrato_violado", message: "payload fora do contrato do canal" };
+  }
+
+  const evento = leitura.event;
+  if (evento.kind === "ignored")
+    return { ok: true, body: { status: "ignored", reason: evento.reason } };
+  if (evento.kind === "connection") {
+    const agora = new Date().toISOString();
+    // `last_status_change_at` é "desde quando a conexão está neste estado" e o
+    // vigia de canal mudo o lê como o começo do funcionamento: só muda quando o
+    // status muda. Um evento repetido não pode reiniciar essa régua.
+    const { error } = await admin
+      .from("channel_sessions")
+      .update({ status: evento.status, last_status_change_at: agora, updated_at: agora })
+      .eq("organization_id", input.session.organization_id)
+      .eq("id", input.session.id)
+      .eq("provider", CHANNEL_PROVIDER_UAZAPI)
+      .is("archived_at", null)
+      .or(`status.is.null,status.neq.${evento.status}`);
+    if (error) throw new Error("uazapi_connection_update_failed");
+    await sincronizarSaudeDaConexao(
+      admin,
+      {
+        id: input.session.id,
+        organization_id: input.session.organization_id,
+        status: evento.status,
+      },
+      { reachable: true, status: evento.status, detail: null },
+      input.session.display_name ?? input.session.phone_number ?? "WhatsApp",
+      "empurrao",
+    );
+    return { ok: true, body: { status: "connection_updated", connection: evento.status } };
+  }
+  const fonte = { label: "Uazapi", origin: "uazapi_webhook", channel: "uazapi" };
+  if (evento.kind === "status") {
+    // Um ACK pode cobrir vários ids. Cada um passa pelo MESMO passo de desfecho
+    // dos outros canais — sem rebaixar `read` e com `delivered_at`/`read_at`
+    // gravados uma vez — em vez de um UPDATE em lote escrito só para este canal.
+    let atualizadas = 0;
+    for (const externalId of evento.externalIds) {
+      const resultado = await ingestNormalizedInbound(admin, {
+        organizationId: input.session.organization_id,
+        channelSessionId: input.session.id,
+        message: mensagemDeDesfecho({ externalId, status: evento.status, occurredAt: evento.occurredAt }),
+        source: fonte,
+      });
+      if (resultado.status === "ingested") atualizadas += 1;
+    }
+    return { ok: true, body: { status: "ack", updated: atualizadas } };
+  }
+  if (evento.kind === "revoked") {
+    // Apagar para todos preserva a linha (`revoked_at`): o histórico de quem
+    // atendeu e o contexto das vizinhas não somem com a mensagem.
+    let aplicadas = 0;
+    for (const externalId of evento.externalIds) {
+      const desfecho = await aplicarEdicaoZernio(admin, input.session.organization_id, {
+        externalId,
+        tipo: "deleted",
+        body: null,
+      });
+      if (desfecho === "aplicado") aplicadas += 1;
+    }
+    return { ok: true, body: { status: "revoked", updated: aplicadas } };
+  }
+
+  const result = await ingestNormalizedInbound(admin, {
+    organizationId: input.session.organization_id,
+    channelSessionId: input.session.id,
+    message: evento.message,
+    source: fonte,
+  });
+  return { ok: true, body: { ...result } };
 }
 
 async function zernioInbound(

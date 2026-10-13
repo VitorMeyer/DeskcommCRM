@@ -204,7 +204,15 @@ export async function sendTurnMessage(
       throw new CrmTransportError(`handler de envio indisponível: ${msg.slice(0, 120)}`);
     }
 
-    return message;
+    return {
+      id: message.id,
+      status: message.status,
+      retryAfterAt:
+        typeof message.metadata?.retry_after_at === 'string'
+          ? message.metadata.retry_after_at
+          : null,
+      retryable: message.metadata?.retry_strategy !== 'manual',
+    };
   });
 }
 
@@ -221,7 +229,7 @@ async function touchLedgerError(
 }
 
 export type SendDisposition =
-  /** Job cancelado em definitivo (veto is_blocked) — não re-tenta. */
+  /** Job encerrado em definitivo (veto is_blocked, ou envio que só volta por ação humana) — não re-tenta. */
   | { action: 'canceled'; job: JobRow | null }
   /** Job devolvido a 'pending' com run_after adiado, sem consumir attempts. */
   | { action: 'requeued'; job: JobRow | null }
@@ -234,7 +242,9 @@ export type SendDisposition =
  *   os follow-ups agendados do contato (irrevogável, regra dura nº 2). A fonte
  *   do bloqueio JÁ é contacts.is_blocked — não existe mais cache a atualizar;
  * - queued → reagenda com `delayMs` (knob SEND_QUEUED_RETRY_MS) SEM consumir
- *   attempts — sessão fora não pode matar mensagem de lead saudável;
+ *   attempts — sessão fora não pode matar mensagem de lead saudável. Se o canal
+ *   disse que só volta por ação humana (`retryable: false`, ex.: restrição da
+ *   plataforma), encerra o job em definitivo — como o veto, sem `dead` nem alerta;
  * - demais → responsabilidade do worker (complete/failJob pelos caminhos normais).
  */
 export async function applySendOutcome(
@@ -264,10 +274,31 @@ export async function applySendOutcome(
       return { action: 'canceled', job: canceled };
     }
     case 'queued': {
+      if (outcome.retryable === false) {
+        // Sem reenvio automático — mas o job precisa SAIR de `running`. Devolver
+        // `none` o deixava com a lease do worker, e o `failJob` que `main.ts`
+        // chama ao ver `JobSettledError` (e que só é no-op quando a lease já não
+        // é dele) reagendava com backoff e, esgotadas as tentativas, abria um
+        // `job_dead` CRÍTICO — o oposto do que uma restrição do canal pede. É o
+        // mesmo terminal do veto: não é incidente de sistema, então nem retry nem
+        // `dead`. A mensagem segue `queued` e o aviso da Central é quem chama a pessoa.
+        const encerrado = await cancelJob(
+          db,
+          job.jobId,
+          job.workerId,
+          'envio aguardando ação humana — sem reenvio automático',
+          job.jobClaim?.acquired_at,
+        );
+        return { action: 'canceled', job: encerrado };
+      }
+      const retryDelayMs =
+        typeof outcome.retryAfterMs === 'number' && Number.isFinite(outcome.retryAfterMs)
+          ? Math.min(7 * 24 * 60 * 60 * 1000, Math.max(1_000, Math.ceil(outcome.retryAfterMs)))
+          : knobs.queuedRetryDelayMs;
       const requeued = await rescheduleJob(db, job.jobId, job.workerId, {
-        delayMs: knobs.queuedRetryDelayMs,
+        delayMs: retryDelayMs,
         acquiredAt: job.jobClaim?.acquired_at,
-        reason: 'sessão do canal fora (resposta queued) — reagendado sem consumir attempts',
+        reason: 'envio queued — reagendado sem consumir attempts',
       });
       return { action: 'requeued', job: requeued };
     }

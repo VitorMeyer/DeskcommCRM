@@ -73,7 +73,14 @@ describe("elo 2 — alguém acorda o worker", () => {
   it("falha do emit NÃO derruba a ingestão", () => {
     // A mensagem já está gravada e visível. Devolver 500 ao provider faria ele
     // reenviar tudo — trocaria uma mídia faltando por uma tempestade.
-    expect(INGEST).toMatch(/logger\.warn\("\[zernio\] emit media\.persist_requested falhou"/);
+    //
+    // O prefixo do log é o RÓTULO do canal que chamou (`[zernio]`, `[Uazapi]`…):
+    // este passo é compartilhado entre transportes, e um log que dissesse sempre
+    // "zernio" mandaria quem investiga procurar no canal errado.
+    expect(INGEST).toMatch(
+      /logger\.warn\(`\[\$\{sourceLabel\}\] emit media\.persist_requested falhou`/,
+    );
+    expect(INGEST).toMatch(/sourceLabel = "zernio"/); // o padrão não muda para quem já usava
   });
 });
 

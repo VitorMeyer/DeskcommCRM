@@ -8,7 +8,16 @@ import { ApiError } from "@/lib/api/types";
 import { useT } from "@/hooks/i18n/useT";
 
 /** Both entry points share the form; the parent keeps polling for WORKING. */
-export function PairingOptions({ sessionId, qr }: { sessionId: string; qr: ReactNode }) {
+export function PairingOptions({
+  sessionId,
+  qr,
+  pairingCodeUrl,
+}: {
+  sessionId: string;
+  qr: ReactNode;
+  /** Another transport can expose the same code flow through its own session seam. */
+  pairingCodeUrl?: string;
+}) {
   const t = useT();
   const id = useId();
   const [mode, setMode] = useState<"qr" | "code">("qr");
@@ -38,8 +47,8 @@ export function PairingOptions({ sessionId, qr }: { sessionId: string; qr: React
     setCode(null);
     try {
       const result = await apiClient.post<{ data: { code: string } }>(
-        `/api/v1/channel-sessions/${sessionId}/pairing-code`,
-        { phone_number: phone },
+        pairingCodeUrl ?? `/api/v1/channel-sessions/${sessionId}/pairing-code`,
+        pairingCodeUrl ? { action: "pairing_code", phone_number: phone } : { phone_number: phone },
         { timeoutMs: 45_000 },
       );
       if (generation.current !== current) return;

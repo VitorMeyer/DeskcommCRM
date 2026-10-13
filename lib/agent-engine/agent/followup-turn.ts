@@ -1186,7 +1186,26 @@ async function sendFixedOutbound(
       runLog.info('envio fixo concluído', { kind: outcome.kind });
       return { kind: "sent" };
     case 'queued':
-      throw new Error('envio fixo: mensagem aguardando o canal — não conclui o passo');
+      await applySendOutcome(pool, {
+        kind: 'queued',
+        idempotencyKey: outcome.idempotencyKey,
+        crmMessageId: outcome.messageId,
+        ...(outcome.retryAfterMs !== undefined ? { retryAfterMs: outcome.retryAfterMs } : {}),
+        ...(outcome.retryable === false ? { retryable: false } : {}),
+      }, {
+        jobId: job.id,
+        workerId: ctx.workerId,
+        tenantId,
+        leadId,
+        jobClaim: claimOfJob(job),
+      }, {
+        queuedRetryDelayMs: deps.knobs.queuedRetryDelayMs,
+      });
+      throw new JobSettledError(
+        outcome.retryable === false
+          ? 'envio aguardando ação humana — job encerrado sem reenvio automático'
+          : 'envio aguardando o canal — job reagendado sem consumir attempts',
+      );
     case 'blocked':
       await applySendOutcome(pool, outcome, { jobId: job.id, workerId: ctx.workerId, tenantId, leadId, jobClaim:claimOfJob(job) }, {
         queuedRetryDelayMs: deps.knobs.queuedRetryDelayMs,

@@ -37,7 +37,13 @@ import {
   abrirArquivoDoWebhook,
   fecharArquivoDoWebhook,
 } from "@/lib/channels/arquivo-de-webhook";
-import { acceptsInboundWebhook, handleInboundWebhook, verifyInboundWebhookSignature, inboundPayloadBelongsToSession } from "@/lib/channels/inbound";
+import {
+  acceptsInboundWebhook,
+  corpoSeguroParaArquivoWebhook,
+  handleInboundWebhook,
+  verifyInboundWebhookSignature,
+  inboundPayloadBelongsToSession,
+} from "@/lib/channels/inbound";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decryptWebhookSecret } from "@/lib/webhooks/secrets";
 
@@ -123,7 +129,7 @@ export async function POST(
     organizationId: sessao.organization_id,
     channelSessionId: sessao.id,
     provider: sessao.provider,
-    rawBody,
+    rawBody: corpoSeguroParaArquivoWebhook(sessao.provider, rawBody),
     headers: req.headers,
   });
 

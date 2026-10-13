@@ -122,14 +122,17 @@ describe("o envelope carrega a thread do provider", () => {
     expect(convSelect, "falta a coluna no select da conversa").toContain(
       "provider_conversation_id",
     );
-    // CINCO desde que o envio por media_url (documento/imagem externa — achado
-    // ao investigar o PDF de proposta que saía sem anexo) ganhou call site
-    // próprio: texto, mídia (storage-first), modelo, contato e media_url. O
+    // SEIS desde que a localização ganhou call site próprio (o transporte a
+    // envia por endpoint de pino, com coordenadas, e não como texto): texto,
+    // mídia (storage-first), modelo, contato, media_url e localização. Antes
+    // eram CINCO, desde que o envio por media_url (documento/imagem externa —
+    // achado ao investigar o PDF de proposta que saía sem anexo) ganhou o seu. O
     // número é conferido, e não `>= 1`, justamente para obrigar quem acrescenta
     // um call site novo a DECIDIR se ele também carrega a thread — foi assim
     // que este caso pegou a rama de modelo, que a princípio não precisaria
     // dela mas precisa quando o provider reaproveita a conversa existente, e
-    // foi assim que ele pegou a de contato e agora a de media_url.
+    // foi assim que ele pegou a de contato, a de media_url e agora a de
+    // localização.
     //
     // A resposta é a mesma das outras: o canal oficial endereça por thread
     // própria, e um envio sem ela abriria conversa nova em vez de continuar a
@@ -137,8 +140,8 @@ describe("o envelope carrega a thread do provider", () => {
     const passagens = [...fonte.matchAll(/providerConversationId:\s*c\.provider_conversation_id/g)];
     expect(
       passagens.length,
-      "todos os call sites (texto, mídia, modelo, contato e media_url) precisam passar",
-    ).toBe(5);
+      "todos os call sites (texto, mídia, modelo, contato, media_url e localização) precisam passar",
+    ).toBe(6);
   });
 });
 

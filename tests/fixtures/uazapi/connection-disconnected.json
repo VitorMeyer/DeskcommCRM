@@ -1,0 +1,12 @@
+{
+  "BaseUrl": "https://example.invalid",
+  "EventType": "connection",
+  "instance": {
+    "lastDisconnect": "2026-09-28T00:04:50.073Z",
+    "lastDisconnectReason": "disconnected by API",
+    "name": "uazapi-spike",
+    "status": "disconnected"
+  },
+  "instanceName": "uazapi-spike",
+  "owner": "test-owner"
+}

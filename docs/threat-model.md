@@ -190,6 +190,20 @@ bytes contado no corpo lido e prazo total de 15 s. A exceção HTTP em loopback
 **Ressalva do mesmo tipo:** o caminho HTTPS real (SNI, certificado, lookup amarrado) não é
 exercitado por nenhum gate — os testes usam HTTP local e um dublê do lookup.
 
+**Terceiro egress do servidor (canal WhatsApp hospedado, opcional):** a URL do servidor é
+**entrada do administrador da organização** (Central de Conexões), e o app a chama com o token da
+instância no cabeçalho (`lib/channels/uazapi/`, `lib/channels/adapters/uazapi.ts`). Guarda: só
+HTTPS em produção, sem credencial nem fragmento na URL, `redirect: "error"`, e o DNS é resolvido e
+checado (`assertDestinoResolvidoSeguro`) na validação **e de novo a cada chamada do adapter**; a URL
+de mídia devolvida pelo serviço passa pela mesma checagem antes do download, com teto de bytes. É a
+mesma guarda do webhook de saída — **não** a das extensões: o endereço checado não é amarrado à
+conexão, então existe a janela de DNS rebinding entre a checagem e o `fetch`. Exige um
+administrador que controle o DNS do próprio host; o que voltaria a ele são trechos curtos de erro.
+Endurecer (amarrar o endereço, como `download.ts`) vale uma primitiva compartilhada pelos dois
+egress com URL de tenant, em PR próprio. **E2E com dublê local não é possível de propósito:** a
+guarda recusa `http:` e IP privado em produção, e a enfraquecer só para teste seria pior. Para ver o
+que roda: `pnpm exec vitest run tests/unit/uazapi-salvar-sessao.test.ts tests/unit/uazapi-validate-credentials.test.ts`.
+
 ### T7 — Sem varredura de secret no histórico git 🟡 CONFIRMADO
 
 Sem gitleaks/trufflehog no CI, sem pre-commit hook (`.husky` e `.pre-commit-config.yaml`

@@ -9346,16 +9346,20 @@ alter table public.channel_sessions
 alter table public.channel_sessions
   add column if not exists datafy_phone_number_id text,
   add column if not exists datafy_waba_id text,
-  add column if not exists datafy_token_encrypted bytea;
+  add column if not exists datafy_token_encrypted bytea,
+  add column if not exists uazapi_instance_id text,
+  add column if not exists uazapi_server_url text,
+  add column if not exists uazapi_instance_token_encrypted bytea;
 
 alter table public.channel_sessions
   drop constraint if exists channel_sessions_provider_check;
 
 alter table public.channel_sessions
   add constraint channel_sessions_provider_check
-  -- 'wacalls' (0233), 'zernio_social' (0368) e 'datafy' (0387) somados AQUI —
+  -- 'wacalls' (0233), 'zernio_social' (0368), 'datafy' (0387) e o canal
+  -- hospedado (0659) somados AQUI —
   -- UM bloco só por constraint (não duplicar drop+add por migration).
-  check (provider = any (array['waha'::text, 'meta_cloud'::text, 'zernio'::text, 'wacalls'::text, 'zernio_social'::text, 'datafy'::text]));
+  check (provider = any (array['waha'::text, 'meta_cloud'::text, 'zernio'::text, 'wacalls'::text, 'zernio_social'::text, 'datafy'::text, 'uazapi'::text]));
 
 alter table public.channel_sessions
   drop constraint if exists channel_sessions_provider_ref_check;
@@ -9368,11 +9372,20 @@ alter table public.channel_sessions
     -- é o mesmo intermediário, com outra superfície de canal.
     (provider in ('zernio', 'zernio_social') and zernio_account_id is not null) or
     (provider = 'wacalls'    and wacalls_session_id    is not null) or
-    (provider = 'datafy'     and datafy_phone_number_id is not null)
+    (provider = 'datafy'     and datafy_phone_number_id is not null) or
+    (provider = 'uazapi'     and uazapi_instance_id is not null
+      and uazapi_server_url is not null and uazapi_instance_token_encrypted is not null)
   );
 
 comment on column public.channel_sessions.zernio_account_id is
   'Identificador da conta conectada NO INTERMEDIÁRIO (accountId), não o phone_number_id da Meta. É o que endereça envio e webhook. Espelhado em lib/channels/session-ref.ts.';
+
+comment on column public.channel_sessions.uazapi_instance_id is
+  'Identificador opaco da instância hospedada. É o sessionRef do canal e é único entre sessões ativas.';
+comment on column public.channel_sessions.uazapi_server_url is
+  'URL base HTTPS da API da instância. Validada contra SSRF antes de gravar; não inclui token.';
+comment on column public.channel_sessions.uazapi_instance_token_encrypted is
+  'Token da instância, cifrado por fn_encrypt_oauth. Nunca é devolvido pela API do CRM.';
 
 -- ---- o que falta para o terceiro canal ENVIAR (migration 0132) ----
 -- Espelho idempotente da 0117. Racional completo no arquivo da migration.
@@ -14509,7 +14522,7 @@ alter table public.webhook_events_log
   drop constraint if exists webhook_events_log_provider_check;
 alter table public.webhook_events_log
   add constraint webhook_events_log_provider_check check (provider in (
-    'waha', 'nuvemshop', 'generic', 'meta_cloud', 'zernio', 'datafy',
+    'waha', 'nuvemshop', 'generic', 'meta_cloud', 'zernio', 'datafy', 'uazapi',
     -- (migration 0601) os provedores de cobrança do revendedor. A linha deles
     -- nasce com organization_id nulo e corpo {id,type}: é ponteiro, nunca o
     -- corpo do provedor, e fica invisível ao tenant pela própria policy.
@@ -54413,3 +54426,38 @@ on conflict (model) do update set
   completion_cents_per_million_tokens = excluded.completion_cents_per_million_tokens,
   notes = excluded.notes,
   superseded_at = null;
+
+-- ---- canal hospedado: instância única e ativa (migration 0659) ----
+-- Os índices dependem de `channel_sessions.archived_at` (migration 0106), que só
+-- existe DEPOIS do bloco original de `channel_sessions` neste arquivo. Por isso
+-- esta parte mora no apêndice e não junto das colunas e dos CHECKs: numa
+-- instalação nova ela rodaria antes de a coluna nascer (42703).
+-- A deduplicação antecede a trava para a atualização de um clone não parar no
+-- primeiro 23505. Fica com a instância a linha MAIS ANTIGA (a que já opera:
+-- renomear o `sessionRef` dela quebraria o envio sem aviso); a mais nova
+-- permanece visível e inoperante.
+with ativos as (
+  select id,
+         row_number() over (
+           partition by uazapi_server_url, uazapi_instance_id
+           order by created_at asc nulls last, id asc
+         ) as posicao
+    from public.channel_sessions
+   where archived_at is null
+     and uazapi_instance_id is not null
+)
+update public.channel_sessions s
+   set uazapi_instance_id = s.uazapi_instance_id || '-conflito-' || s.id::text
+  from ativos a
+ where a.id = s.id
+   and a.posicao > 1;
+
+create unique index if not exists channel_sessions_uazapi_instance_id_ativo_unique
+  on public.channel_sessions (uazapi_server_url, uazapi_instance_id)
+  where archived_at is null
+    and uazapi_server_url is not null
+    and uazapi_instance_id is not null;
+
+create unique index if not exists channel_sessions_uazapi_org_ativo_unique
+  on public.channel_sessions (organization_id)
+  where provider = 'uazapi' and archived_at is null;

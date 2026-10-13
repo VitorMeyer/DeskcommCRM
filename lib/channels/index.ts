@@ -4,6 +4,7 @@
  */
 import { datafyAdapter } from "./adapters/datafy";
 import { metaCloudAdapter } from "./adapters/meta-cloud";
+import { uazapiAdapter } from "./adapters/uazapi";
 import { wahaAdapter } from "./adapters/waha";
 import { socialAdapter } from "./social/adapter";
 import { zernioAdapter } from "./adapters/zernio";
@@ -19,6 +20,7 @@ const ADAPTERS: Record<ProviderDeMensagem, ChannelAdapter | null> = {
   zernio: zernioAdapter,
   zernio_social: socialAdapter,
   datafy: datafyAdapter,
+  uazapi: uazapiAdapter,
 };
 
 /**
@@ -45,6 +47,8 @@ export type { ChannelSessionRef } from "./session-ref";
 export type {
   ChannelAdapter,
   ChannelCapabilities,
+  ChannelSessionOps,
+  ChannelSessionStatus,
   ChannelProvider,
   ProviderDeMensagem,
   OutboundEnvelope,

@@ -75,28 +75,6 @@ export async function findUazapiSession(
   return resumo((data as unknown as Record<string, unknown>[] | null)?.[0] ?? null, basePublicUrl);
 }
 
-/** Linha arquivada DESTA instância na organização: reconectá-la a desarquiva. */
-async function arquivadaDaInstancia(
-  admin: SupabaseClient,
-  organizationId: string,
-  serverUrl: string,
-  instanceId: string,
-): Promise<{ id: string } | null> {
-  const { data, error } = await admin
-    .from("channel_sessions")
-    .select("id")
-    .eq("organization_id", organizationId)
-    .eq("provider", CHANNEL_PROVIDER_UAZAPI)
-    .eq("uazapi_server_url", serverUrl)
-    .eq("uazapi_instance_id", instanceId)
-    .not("archived_at", "is", null)
-    .order("archived_at", { ascending: false })
-    .limit(1);
-  if (error) return null;
-  const linha = (data as { id: string }[] | null)?.[0];
-  return linha ? { id: String(linha.id) } : null;
-}
-
 /**
  * Valida, cifra e persiste uma sessão. A organização vem sempre do guard.
  *
@@ -105,9 +83,10 @@ async function arquivadaDaInstancia(
  *    outra (a instância anterior expirou ou foi trocada). A linha é o canal da
  *    organização, com o acesso da IA e o histórico ligados a ela; a instância é
  *    o que está por trás, como a sessão que se re-pareia no canal por QR;
- *  - não há ativa, mas a organização já usou ESTA instância: a linha arquivada
- *    volta;
- *  - nenhuma das duas: linha nova.
+ *  - não há ativa: linha nova, também quando a instância é uma que a organização
+ *    já usou e removeu. A linha removida fica arquivada com o histórico dela,
+ *    como no canal por QR — desarquivá-la exigiria procurar a instância entre as
+ *    INATIVAS, onde o índice único não garante uma linha só.
  *
  * Trocar de instância com o número conectado é recusado: a troca derrubaria o
  * atendimento em silêncio. Quem opera desconecta primeiro — e desconectar não
@@ -140,14 +119,7 @@ export async function salvarUazapiSession(
       motivo: "O número atual está conectado. Desconecte-o antes de trocar de instância.",
     };
   }
-  const existente =
-    ativa ??
-    (await arquivadaDaInstancia(
-      admin,
-      input.organizationId,
-      validacao.serverUrl,
-      validacao.instanceId,
-    ));
+  const existente = ativa;
 
   const tokenEncrypted = await encryptWebhookSecret(admin, input.token.trim());
   // O endpoint de entrada usa o token de caminho opaco como autenticação. A
@@ -204,7 +176,7 @@ export async function salvarUazapiSession(
   const saved = existente
     ? await admin
         .from("channel_sessions")
-        .update({ ...row, archived_at: null } as never)
+        .update(row as never)
         .eq("organization_id", input.organizationId)
         .eq("id", existente.id)
         .select(`${COLUNAS}, ${ARCHIVED_AT}`)

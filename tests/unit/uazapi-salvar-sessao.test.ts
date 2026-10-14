@@ -209,7 +209,6 @@ describe("salvarUazapiSession", () => {
       uazapi_instance_token_encrypted: "enc:tok",
       webhook_path_token: "caminho",
       status: "WORKING",
-      archived_at: null,
     });
     expect(ops.some((o) => o.op === "insert")).toBe(false);
     expect(chamadaDoWebhook()).toBeDefined(); // o webhook vai para a instância NOVA
@@ -224,19 +223,28 @@ describe("salvarUazapiSession", () => {
     expect(update.payload).toMatchObject({ uazapi_instance_token_encrypted: "enc:tok" });
   });
 
-  it("a MESMA instância reconectada depois de removida desarquiva a linha dela", async () => {
+  it("depois de removida, reconectar a MESMA instância é linha nova; a arquivada fica com o histórico", async () => {
     linhasExistentes = [{ ...LINHA_SALVA, archived_at: "2026-09-01T00:00:00Z" }];
     const r = await salvarUazapiSession(admin, ENTRADA);
     expect(r.ok).toBe(true);
-    const update = ops.find((o) => o.op === "update")!;
-    expect(update.eqs).toMatchObject({ organization_id: "org-1", id: "sess-1" });
-    expect(update.payload).toMatchObject({ archived_at: null, uazapi_instance_id: "inst-1" });
-    expect(ops.some((o) => o.op === "insert")).toBe(false);
+    expect(ops.some((o) => o.op === "update")).toBe(false);
+    expect(ops.find((o) => o.op === "insert")?.payload).toMatchObject({
+      organization_id: "org-1",
+      uazapi_instance_id: "inst-1",
+    });
   });
 
-  it("linha arquivada de OUTRA instância não volta: a conexão nova é linha nova", async () => {
+  it("a conexão removida não conta como ativa: não bloqueia nem recebe a troca", async () => {
+    // Arquivada e WORKING no espelho (o arquivamento grava STOPPED, mas a regra
+    // não pode depender disso): com o recorte de ativas, ela não é "o número
+    // conectado" que recusaria a troca.
     linhasExistentes = [
-      { ...LINHA_SALVA, uazapi_instance_id: "outra-inst", archived_at: "2026-09-01T00:00:00Z" },
+      {
+        ...LINHA_SALVA,
+        uazapi_instance_id: "outra-inst",
+        status: "WORKING",
+        archived_at: "2026-09-01T00:00:00Z",
+      },
     ];
     const r = await salvarUazapiSession(admin, ENTRADA);
     expect(r.ok).toBe(true);

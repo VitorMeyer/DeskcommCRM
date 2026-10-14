@@ -37,7 +37,7 @@ Integrar a **uazapi** como sexto transporte de WhatsApp do DeskcommCRM, ao lado 
   - credencial recusada (401/403) nas operações de sessão é desfecho com nome (`CredencialRecusadaError`): a tela diz "o servidor recusou o token salvo — troque ou remova", para de consultar e esconde QR/código;
   - **trocar o token** grava na MESMA linha (mesmo canal, mesmo acesso da IA e histórico): mesma instância com token novo, ou OUTRA instância quando o número atual não está conectado. Com o número conectado, a troca de instância é recusada — desconectar primeiro, e desconectar não depende do token estar vivo;
   - **remover** é a exclusão comum da Central (`DELETE /api/v1/channel-sessions/[id]`, com o diálogo que mostra o que fica guardado): desconecta o número na instância em best-effort, rotaciona a URL do webhook e arquiva ou apaga a linha. **A instância não é apagada no serviço**: quem a criou foi o cliente, no painel deles;
-  - a conexão removida sai da aba (a tela mostrava a linha arquivada, com botões que respondiam "Este canal foi excluído"); reconectar a mesma instância depois desarquiva a linha dela.
+  - a conexão removida sai da aba (a tela mostrava a linha arquivada, com botões que respondiam "Este canal foi excluído"). Reconectar depois é linha nova, também para a mesma instância — como no canal por QR; a removida fica arquivada com o histórico dela.
 - 🟡 Tela "Conectar uazapi": colar URL e token de uma instância já criada no painel deles, validar na hora, guardar cifrado; sem prova visual E2E.
 - 🟡 Métodos de sessão no `ChannelAdapter` (novo grupo opcional `sessao?`):
   - `connect(QR|code)`: abre o fluxo de pareamento.
@@ -330,6 +330,20 @@ Conferido campo a campo contra `https://docs.uazapi.com/openapi-bundled.json` (v
 10. [ ] Artefato versionado na `main` com attribution das sessões (Opus 5.5 e Haiku 4.5).
 
 ---
+
+## Evidência pela tela
+
+Capturas versionadas em `evidence/canal-uazapi/`, e o que cada uma prova:
+
+| Captura | Onde e quando | O que mostra |
+|---|---|---|
+| `evidence/canal-uazapi/sem-flag-01-conexoes.png` | ambiente local, 2026-10-13 | Sem `UAZAPI_ENABLED`, a Central de Conexões não tem a aba do canal hospedado. |
+| `evidence/canal-uazapi/validar-01-conexoes.png` | ambiente local, 2026-10-13 | Com a variável ligada, a aba aparece ao lado das outras. |
+| `evidence/canal-uazapi/validar-02-aba-uazapi.png` | ambiente local, 2026-10-13 | O formulário da aba antes de conectar: URL do servidor e token. |
+| `evidence/canal-uazapi/validar-03-depois-de-validar.png` | ambiente local, 2026-10-13 | Token recusado pela API real vira "Token recusado pelo servidor." e nada é gravado. Na época o erro só aparecia no aviso que some; desde 2026-10-14 ele também fica escrito na aba. |
+| `evidence/canal-uazapi/onboarding-passo-whatsapp.png` | ambiente local, 2026-10-13 | Achado em aberto: o passo de WhatsApp do onboarding não oferece o canal hospedado. |
+| `evidence/canal-uazapi/trocar-01-token-recusado.png` | instalação de teste (`plataformaanalice`), 2026-10-14, versão `1.80.0+uazapi.0249ebd` | A conexão real cujo token o servidor passou a recusar (instância gratuita expirada): a aba diz "troque ou remova", traz a URL gravada, esconde QR e código, e não consultou o estado nenhuma vez nos 16 s medidos depois do aviso (antes: um 502 a cada 5 s). |
+| `evidence/canal-uazapi/trocar-02-dialogo-remover.png` | idem | "Remover conexão" abre o diálogo comum de exclusão da Central, com o preflight do que fica guardado. A prova cancelou: excluir e trocar a conexão real ficaram para o dono. |
 
 ## Próximos passos
 

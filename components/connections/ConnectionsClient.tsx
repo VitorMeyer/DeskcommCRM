@@ -776,12 +776,17 @@ export function frasesDoImpacto(
  * que agora chega no preflight. O desfecho vem da MESMA função que o DELETE usa
  * para decidir, antes do clique.
  */
-function ExcluirCanalDialog({
+export function ExcluirCanalDialog({
   canal,
   onCancel,
   onDeleted,
 }: {
-  canal: ChannelSession;
+  /**
+   * Só o que o diálogo usa: a aba de outro transporte o abre sem a linha da
+   * lista, e sem nome de sessão do transporte por QR, que ela não tem.
+   */
+  canal: Pick<ChannelSession, "id" | "display_name" | "phone_number"> &
+    Partial<Pick<ChannelSession, "waha_session_name">>;
   onCancel: () => void;
   onDeleted: () => void;
 }) {
@@ -831,7 +836,7 @@ function ExcluirCanalDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {t("Excluir")} {channelLabel(canal, t)}?
+            {t("Excluir")} {channelLabel({ waha_session_name: null, ...canal }, t)}?
           </DialogTitle>
           <DialogDescription asChild>
             <div className="space-y-2">

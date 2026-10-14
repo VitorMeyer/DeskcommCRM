@@ -24,6 +24,7 @@ import { getWahaClient } from "@/lib/waha/client";
 import { apagarAssinaturaSocial } from "@/lib/channels/social/store";
 import { logger } from "@/lib/logger";
 import { decryptWebhookSecret } from "@/lib/webhooks/secrets";
+import { CredencialRecusadaError } from "@/lib/channels/credencial-recusada";
 
 // `orgAtivaDaApi` REAL (sobre o `orgAtivaSemPortao` mockado): é ela que decide o 403 da org suspensa.
 vi.mock("@/lib/auth/require-role", async (original) => ({
@@ -51,6 +52,21 @@ vi.mock("@/lib/channels/social/store", () => ({ apagarAssinaturaSocial: vi.fn() 
 vi.mock("@/lib/webhooks/secrets", async (importOriginal) => {
   const real = (await importOriginal()) as Record<string, unknown>;
   return { ...real, decryptWebhookSecret: vi.fn() };
+});
+
+// Sessão hospedada: o adapter de verdade falaria com o serviço remoto pela
+// credencial cifrada. Aqui só interessa o que a ROTA pede ao seam de sessão — e
+// que ela siga quando ele recusa a credencial.
+const sessaoHospedada = { disconnect: vi.fn() };
+vi.mock("@/lib/channels", async (importOriginal) => {
+  const real = (await importOriginal()) as typeof import("@/lib/channels");
+  return {
+    ...real,
+    getAdapter: (provider: Parameters<typeof real.getAdapter>[0]) =>
+      provider === "uazapi"
+        ? { ...real.getAdapter(provider), sessao: sessaoHospedada }
+        : real.getAdapter(provider),
+  };
 });
 
 const ORG = "22222222-2222-4222-8222-222222222222";
@@ -570,6 +586,100 @@ describe("DELETE /api/v1/channel-sessions/[id]", () => {
       expect(patch.webhook_path_token).toMatch(/^[a-f0-9]{32}$/);
       expect(patch.webhook_path_token).not.toBe("tokenantigo");
       expect(patch).not.toHaveProperty("meta_token_encrypted");
+    });
+  });
+
+  /**
+   * ⭐ Primeiro teste vivo do canal hospedado (2026-10-14): a instância gratuita
+   * expirou, o servidor passou a recusar o token, e a conexão não saía mais da
+   * tela — a remoção pedia ao servidor, com o token morto, que apagasse a
+   * instância. A exclusão é desta rota, e a sessão remota é best-effort.
+   */
+  describe("canal de SESSÃO HOSPEDADA → desconecta o número, não apaga a instância", () => {
+    const hospedada = (over: Linha = {}) =>
+      canal({
+        provider: "uazapi",
+        waha_session_name: null,
+        uazapi_instance_id: "inst-1",
+        webhook_path_token: "tokenantigo",
+        status: "FAILED",
+        ...over,
+      });
+
+    it("desconecta ANTES de mexer na linha, pelo seam de sessão, sem falar com o WAHA", async () => {
+      authOk();
+      const db = makeDb({ sessions: [hospedada()] });
+      sessaoHospedada.disconnect.mockImplementation(async () => {
+        db.eventos.push("hospedada:disconnect");
+      });
+      const waha = wahaOk(db);
+      const { DELETE } = await import("./route");
+      const res = await DELETE(reqDelete(), ctx());
+
+      expect(res.status).toBe(200);
+      expect(sessaoHospedada.disconnect).toHaveBeenCalledWith({
+        organizationId: ORG,
+        sessionRef: "inst-1",
+      });
+      expect(db.eventos[0]).toBe("hospedada:disconnect");
+      expect(waha.logoutSession).not.toHaveBeenCalled();
+      expect(audit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: expect.objectContaining({ sessao_hospedada: "desconectada" }),
+        }),
+      );
+    });
+
+    it("⭐ token recusado (instância expirada) → a exclusão acontece mesmo assim", async () => {
+      authOk();
+      const db = makeDb({ sessions: [hospedada()] });
+      sessaoHospedada.disconnect.mockRejectedValue(new CredencialRecusadaError("Invalid token"));
+      wahaOk(db);
+      const { DELETE } = await import("./route");
+      const res = await DELETE(reqDelete(), ctx());
+
+      expect(res.status).toBe(200);
+      expect(db.escritas[0]).toMatchObject({ tipo: "delete", table: "channel_sessions" });
+      expect(audit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: "channel.deleted",
+          metadata: expect.objectContaining({ sessao_hospedada: "credencial_recusada" }),
+        }),
+      );
+    });
+
+    it("serviço fora do ar também não prende a exclusão, e a auditoria diz \"falhou\"", async () => {
+      authOk();
+      const db = makeDb({ sessions: [hospedada()] });
+      sessaoHospedada.disconnect.mockRejectedValue(new Error("fetch failed"));
+      wahaOk(db);
+      const { DELETE } = await import("./route");
+      expect((await DELETE(reqDelete(), ctx())).status).toBe(200);
+      expect(db.escritas).not.toHaveLength(0);
+      expect(audit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: expect.objectContaining({ sessao_hospedada: "falhou" }),
+        }),
+      );
+    });
+
+    it("no arquivamento rotaciona o token da URL e não toca na credencial de outro canal", async () => {
+      authOk();
+      const db = makeDb({
+        sessions: [hospedada()],
+        rows: { conversations: [{ id: "c1", organization_id: ORG, channel_session_id: CANAL }] },
+      });
+      sessaoHospedada.disconnect.mockResolvedValue(undefined);
+      wahaOk(db);
+      const { DELETE } = await import("./route");
+      const res = await DELETE(reqDelete(), ctx());
+
+      expect((await res.json()).data.archived).toBe(true);
+      const patch = db.escritas[0]?.patch as Linha;
+      expect(patch.webhook_path_token).toMatch(/^[a-f0-9]{32}$/);
+      expect(patch.webhook_path_token).not.toBe("tokenantigo");
+      expect(patch).not.toHaveProperty("meta_token_encrypted");
+      expect(patch.archived_at).toEqual(expect.any(String));
     });
   });
 });

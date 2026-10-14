@@ -43,6 +43,7 @@ export {
   transportaMensagem,
 } from "./capabilities";
 export { CHANNEL_SESSION_REF_COLUMNS, resolveSessionRef } from "./session-ref";
+export { CredencialRecusadaError } from "./credencial-recusada";
 export type { ChannelSessionRef } from "./session-ref";
 export type {
   ChannelAdapter,

@@ -19,6 +19,20 @@ vi.mock("@/lib/api/client", () => ({
 vi.mock("@/hooks/i18n/useT", () => ({ useT: () => (s: string) => s }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock("@/components/connections/ChannelAiAccess", () => ({ ChannelAiAccess: () => null }));
+// O diálogo de exclusão é o COMUM da Central (preflight + DELETE da rota de
+// canais); aqui só importa que esta aba o abre com a conexão certa e reage ao fim.
+vi.mock("@/components/connections/ConnectionsClient", () => ({
+  ExcluirCanalDialog: (p: {
+    canal: { id: string };
+    onCancel: () => void;
+    onDeleted: () => void;
+  }) => (
+    <div role="dialog" data-canal={p.canal.id}>
+      <button onClick={p.onCancel}>Cancelar</button>
+      <button onClick={p.onDeleted}>Confirmar exclusão</button>
+    </div>
+  ),
+}));
 vi.mock("@/components/connections/PairingOptions", () => ({
   PairingOptions: (p: { sessionId: string; pairingCodeUrl?: string; qr: React.ReactNode }) => (
     <div data-testid="pairing" data-session={p.sessionId} data-url={p.pairingCodeUrl}>
@@ -36,6 +50,7 @@ const ID = "11111111-1111-4111-8111-111111111111";
 const sessao = (extra: Record<string, unknown> = {}) => ({
   id: ID,
   instanceId: "inst-1",
+  serverUrl: "https://servidor.example.test",
   phoneNumber: null,
   displayName: null,
   status: "STOPPED",
@@ -95,7 +110,7 @@ describe("sem conexão", () => {
     api(null);
     montar();
     await screen.findByRole("button", { name: "Validar e conectar" });
-    for (const nome of ["Gerar QR Code", "Desconectar", "Remover conexão", "Atualizar conexão"]) {
+    for (const nome of ["Gerar QR Code", "Desconectar", "Remover conexão", "Trocar token"]) {
       expect(screen.queryByRole("button", { name: nome })).toBeNull();
     }
     expect(screen.queryByTestId("pairing")).toBeNull();
@@ -126,9 +141,9 @@ describe("com conexão parada", () => {
     expect(await screen.findByText("Número ainda não pareado")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Gerar QR Code" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Remover conexão" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Atualizar conexão" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Trocar token" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Desconectar" })).toBeNull();
-    expect(screen.getByPlaceholderText("gravado — preencha para atualizar")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Cole o token novo para trocar")).toBeInTheDocument();
   });
 
   it("o pareamento por código usa a rota DESTA sessão, não a do outro transporte", async () => {
@@ -196,5 +211,77 @@ describe("número já em uso por outro canal", () => {
     montar();
     await screen.findByRole("button", { name: "Desconectar" });
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("trocar o token", () => {
+  it("a URL gravada já vem no campo: trocar pede só o token novo", async () => {
+    api(sessao({ status: "FAILED" }));
+    vi.mocked(apiClient.post).mockResolvedValue({ data: { session: sessao() } } as never);
+    montar();
+    const url = await screen.findByLabelText("URL do servidor");
+    await waitFor(() => expect(url).toHaveValue("https://servidor.example.test"));
+
+    const botao = screen.getByRole("button", { name: "Trocar token" });
+    expect(botao).toBeDisabled(); // sem token novo não há o que trocar
+    await userEvent.type(screen.getByLabelText("Token da instância"), "token-novo");
+    await userEvent.click(botao);
+    await waitFor(() =>
+      expect(apiClient.post).toHaveBeenCalledWith(ROTA, {
+        server_url: "https://servidor.example.test",
+        token: "token-novo",
+      }),
+    );
+  });
+
+  it("a recusa do servidor fica escrita na tela, não só num aviso que some", async () => {
+    api(sessao({ status: "WORKING", phoneNumber: "5531999998888" }));
+    vi.mocked(apiClient.post).mockRejectedValue(
+      new Error("O número atual está conectado. Desconecte-o antes de trocar de instância."),
+    );
+    montar();
+    await userEvent.type(await screen.findByLabelText("Token da instância"), "outro");
+    await userEvent.click(screen.getByRole("button", { name: "Trocar token" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/Desconecte-o antes de trocar/);
+  });
+});
+
+describe("token salvo recusado pelo servidor", () => {
+  it("diz o que fazer, e não oferece QR nem pareamento com um token morto", async () => {
+    api(sessao({ status: "FAILED" }), { status: "FAILED", credential_rejected: true });
+    montar();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /recusou o token salvo.*trocar, ou remova a conexão/,
+    );
+    expect(screen.queryByRole("button", { name: "Gerar QR Code" })).toBeNull();
+    expect(screen.queryByTestId("pairing")).toBeNull();
+    // as duas saídas continuam ao alcance
+    expect(screen.getByRole("button", { name: "Trocar token" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remover conexão" })).toBeEnabled();
+  });
+});
+
+describe("remover a conexão", () => {
+  it("abre o diálogo comum de exclusão para ESTA conexão, e nada é apagado sem confirmar", async () => {
+    api(sessao({ status: "FAILED" }));
+    montar();
+    await userEvent.click(await screen.findByRole("button", { name: "Remover conexão" }));
+    expect(screen.getByRole("dialog")).toHaveAttribute("data-canal", ID);
+    expect(apiClient.post).not.toHaveBeenCalled(); // a rota desta aba não apaga mais nada
+
+    await userEvent.click(screen.getByRole("button", { name: "Cancelar" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("excluída, a conexão sai da tela e o formulário volta a ser o de conectar", async () => {
+    api(sessao({ status: "FAILED" }));
+    montar();
+    await userEvent.click(await screen.findByRole("button", { name: "Remover conexão" }));
+    api(null); // o servidor já não devolve a conexão removida
+    await userEvent.click(screen.getByRole("button", { name: "Confirmar exclusão" }));
+
+    expect(await screen.findByRole("button", { name: "Validar e conectar" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remover conexão" })).toBeNull();
+    expect(screen.getByLabelText("URL do servidor")).toHaveValue("");
   });
 });

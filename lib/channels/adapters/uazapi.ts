@@ -15,6 +15,7 @@ import {
 } from "@/lib/messaging/media/types";
 
 import { CHANNEL_PROVIDER_UAZAPI } from "../capabilities";
+import { CredencialRecusadaError } from "../credencial-recusada";
 import {
   canalUazapiLigado,
   resolveUazapiCreds,
@@ -185,13 +186,24 @@ function corpoDeEnvio(envelope: OutboundEnvelope): { path: string; body: Record<
   return { path: "/send/text", body: { ...comum, text: envelope.body ?? "" } };
 }
 
+/** 401/403: a instância expirou, foi apagada ou teve o token trocado no painel. */
+function credencialFoiRecusada(response: Response): boolean {
+  return response.status === 401 || response.status === 403;
+}
+
 async function exigirSucesso(
   creds: UazapiCredentials,
   path: string,
   init: RequestInit,
+  opcoes: { credencialComNome?: boolean } = {},
 ): Promise<UazapiBody> {
   const { response, body } = await requisitarUazapi(creds, path, init);
   if (response.ok && !body.error) return body;
+
+  // Só nas operações de sessão: no envio, o 401 segue como `uazapi_401` e cai
+  // na falha comum do envio, sem mudar o código que a mensagem registra.
+  if (opcoes.credencialComNome && credencialFoiRecusada(response))
+    throw new CredencialRecusadaError(detalheDoErro(body, response.status));
 
   if (body.provider_code === 463)
     throw new Error("uazapi_timelock: restrição temporária para iniciar conversas.");
@@ -250,18 +262,25 @@ export const uazapiAdapter: ChannelAdapter = {
   sessao: {
     async connect(input) {
       const creds = await credenciaisDaSessao(input);
-      const body = await exigirSucesso(creds, "/instance/connect", {
-        method: "POST",
-        body: JSON.stringify(
-          input.phoneNumber ? { phone: input.phoneNumber.replace(/\D/g, "") } : {},
-        ),
-      });
+      const body = await exigirSucesso(
+        creds,
+        "/instance/connect",
+        {
+          method: "POST",
+          body: JSON.stringify(
+            input.phoneNumber ? { phone: input.phoneNumber.replace(/\D/g, "") } : {},
+          ),
+        },
+        { credencialComNome: true },
+      );
       return statusDaSessao(body);
     },
 
     async getStatus(input) {
       const creds = await credenciaisDaSessao(input);
       const { response, body } = await requisitarUazapi(creds, "/instance/status");
+      if (credencialFoiRecusada(response))
+        throw new CredencialRecusadaError(detalheDoErro(body, response.status));
       if (!response.ok || body.error) {
         throw new Error(`uazapi_${response.status}: ${detalheDoErro(body, response.status)}`);
       }
@@ -270,12 +289,12 @@ export const uazapiAdapter: ChannelAdapter = {
 
     async disconnect(input) {
       const creds = await credenciaisDaSessao(input);
-      await exigirSucesso(creds, "/instance/disconnect", { method: "POST", body: "{}" });
-    },
-
-    async delete(input) {
-      const creds = await credenciaisDaSessao(input);
-      await exigirSucesso(creds, "/instance", { method: "DELETE" });
+      await exigirSucesso(
+        creds,
+        "/instance/disconnect",
+        { method: "POST", body: "{}" },
+        { credencialComNome: true },
+      );
     },
   },
 

@@ -12,6 +12,7 @@ vi.mock("@/lib/channels/uazapi/credentials", async (original) => ({
 }));
 
 import { uazapiAdapter } from "@/lib/channels/adapters/uazapi";
+import { CredencialRecusadaError } from "@/lib/channels/credencial-recusada";
 import { resolveUazapiCreds } from "@/lib/channels/uazapi/credentials";
 import type { OutboundEnvelope } from "@/lib/channels/types";
 
@@ -215,5 +216,53 @@ describe("adapter uazapi", () => {
       retryStrategy: "manual",
       operatorNotice: { kind: "channel_number_alert", severity: "warn" },
     });
+  });
+
+  it("na SESSÃO, token recusado (401/403) é desfecho com nome — nas três operações", async () => {
+    const escopo = { organizationId: "org-1", sessionRef: "inst-1" };
+    const recusa = (status: number) =>
+      vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ error: "Invalid token" }), { status }),
+        );
+
+    recusa(401);
+    await expect(uazapiAdapter.sessao!.getStatus(escopo)).rejects.toBeInstanceOf(
+      CredencialRecusadaError,
+    );
+    recusa(403);
+    await expect(uazapiAdapter.sessao!.disconnect(escopo)).rejects.toBeInstanceOf(
+      CredencialRecusadaError,
+    );
+    recusa(401);
+    await expect(uazapiAdapter.sessao!.connect(escopo)).rejects.toBeInstanceOf(
+      CredencialRecusadaError,
+    );
+
+    // Outra falha continua sendo falha comum: só a credencial ganha nome.
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "boom" }), { status: 500 }),
+    );
+    const outra = await uazapiAdapter.sessao!.getStatus(escopo).catch((e: unknown) => e);
+    expect(outra).not.toBeInstanceOf(CredencialRecusadaError);
+    expect(String(outra)).toMatch(/uazapi_500/);
+  });
+
+  it("no ENVIO, o 401 segue como falha comum (`uazapi_401`), sem mudar o código da mensagem", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "Invalid token" }), { status: 401 }),
+    );
+    const erro = await uazapiAdapter.send(envelope()).catch((e: unknown) => e);
+    expect(erro).not.toBeInstanceOf(CredencialRecusadaError);
+    expect(String(erro)).toMatch(/uazapi_401/);
+  });
+
+  it("a sessão não oferece apagar a instância: ela foi criada no painel do serviço, não aqui", () => {
+    expect(Object.keys(uazapiAdapter.sessao!).sort()).toEqual([
+      "connect",
+      "disconnect",
+      "getStatus",
+    ]);
   });
 });

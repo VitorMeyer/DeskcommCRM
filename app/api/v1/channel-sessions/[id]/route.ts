@@ -26,7 +26,19 @@ import { audit } from "@/lib/audit";
 import { ok, fail } from "@/lib/api/wrappers";
 import { loadAuthUser, mfaEmDivida } from "@/lib/auth/server";
 import { orgAtivaDaApi, requireRole } from "@/lib/auth/require-role";
-import { CHANNEL_PROVIDER_SOCIAL, CHANNEL_PROVIDER_WAHA } from "@/lib/channels/capabilities";
+import {
+  CredencialRecusadaError,
+  getAdapter,
+  resolveSessionRef,
+  CHANNEL_SESSION_REF_COLUMNS,
+  type ChannelSessionRef,
+  type ProviderDeMensagem,
+} from "@/lib/channels";
+import {
+  CHANNEL_PROVIDER_SOCIAL,
+  CHANNEL_PROVIDER_WAHA,
+  transportaMensagem,
+} from "@/lib/channels/capabilities";
 import { resolverSaudeDaConexaoRemovida } from "@/lib/channels/health";
 import { sincronizarAvisoDePausa } from "@/lib/channels/central-de-pausa";
 import { desfazerWebhookDoNumero } from "@/lib/channels/meta/webhook-override";
@@ -336,9 +348,7 @@ export async function DELETE(
   const supabase = await createClient();
   const { data: session } = await supabase
     .from("channel_sessions")
-    .select(
-      "id, provider, waha_session_name, display_name, phone_number, meta_phone_number_id, meta_token_encrypted",
-    )
+    .select(`${CHANNEL_SESSION_REF_COLUMNS}, id, display_name, phone_number, meta_token_encrypted`)
     .eq("organization_id", activeOrg.orgId)
     .eq("id", id)
     .maybeSingle();
@@ -368,6 +378,17 @@ export async function DELETE(
    * estava fora do ar e a exclusão seguiu em best-effort.
    */
   let socialWebhook: "apagada" | "sem_integracao" | "falhou" | "nao_social" = "nao_social";
+
+  /**
+   * O que terminou sendo a sessão no transporte hospedado — o canal cujo adapter
+   * oferece `sessao`, numa instância que o cliente criou no painel do serviço.
+   * Vai para o metadata da auditoria pelo mesmo motivo dos dois acima.
+   */
+  let sessaoHospedada: "desconectada" | "credencial_recusada" | "falhou" | "nao_se_aplica" =
+    "nao_se_aplica";
+  const opsDeSessao = transportaMensagem(session.provider)
+    ? getAdapter(session.provider as ProviderDeMensagem).sessao
+    : undefined;
 
   if (session.provider === CHANNEL_PROVIDER_WAHA) {
     const waha = getWahaClient();
@@ -417,6 +438,36 @@ export async function DELETE(
     // DEPOIS de apagar a assinatura, que pode ter sido achada pela URL dele.
     // (`meta_token_encrypted` não entra aqui de propósito: a linha social não
     // usa essa coluna — a credencial que autoriza a chamada vive na integração.)
+    patch.webhook_path_token = randomUUID().replace(/-/g, "");
+  } else if (opsDeSessao) {
+    // ─── SESSÃO HOSPEDADA: O NÚMERO SAI, A INSTÂNCIA FICA ───────────────────
+    //
+    // A instância foi criada pelo cliente no painel do serviço, não por esta
+    // instalação, e excluir o canal aqui não a apaga lá. O CRM desfaz o que ele
+    // mesmo fez: desconecta o número (o par do logout do canal por QR) e
+    // rotaciona o `webhook_path_token`, para a URL registrada na instância virar
+    // 404.
+    //
+    // Best-effort, e é esse o ponto: a credencial pode ter morrido (instância
+    // gratuita que expirou, token trocado no painel), e a exclusão NÃO pode
+    // depender dela. Foi o beco do primeiro teste vivo (2026-10-14): com o token
+    // recusado, nem remover nem trocar a conexão eram possíveis.
+    try {
+      await opsDeSessao.disconnect({
+        organizationId: activeOrg.orgId,
+        sessionRef: resolveSessionRef(session as unknown as ChannelSessionRef),
+      });
+      sessaoHospedada = "desconectada";
+    } catch (err) {
+      sessaoHospedada = err instanceof CredencialRecusadaError ? "credencial_recusada" : "falhou";
+      logger.warn("Não foi possível desconectar a sessão hospedada ao excluir o canal", {
+        requestId,
+        channel_session_id: id,
+        organization_id: activeOrg.orgId,
+        desfecho: sessaoHospedada,
+        erro: err instanceof Error ? err.message : String(err),
+      });
+    }
     patch.webhook_path_token = randomUUID().replace(/-/g, "");
   } else {
     // ─── O OVERRIDE NÃO FICA ÓRFÃO NA META (issue #1334) ─────────────────────
@@ -568,6 +619,7 @@ export async function DELETE(
       avisos_fechados: avisosFechados,
       webhook_override: webhookOverride,
       social_webhook: socialWebhook,
+      sessao_hospedada: sessaoHospedada,
       ...impact.history,
       ...impact.configuration,
     },

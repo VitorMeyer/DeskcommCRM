@@ -521,7 +521,17 @@ export interface ChannelSessionStatus {
   displayName: string | null;
 }
 
-/** Operações opcionais para canais cujo vínculo é uma sessão pareada. */
+/**
+ * Operações opcionais para canais cujo vínculo é uma sessão pareada.
+ *
+ * Credencial recusada pelo transporte sai como `CredencialRecusadaError`
+ * (`./credencial-recusada`), para quem chama poder seguir sem ela.
+ *
+ * Não há `delete`: a sessão hospedada vive numa instância que o cliente criou no
+ * painel do serviço, não esta instalação, e excluir o canal no CRM não a apaga
+ * lá. Excluir é da rota comum (`DELETE /api/v1/channel-sessions/[id]`), que
+ * desconecta o número e arquiva ou apaga a linha.
+ */
 export interface ChannelSessionOps {
   connect(
     input: ChannelTenantScope & {
@@ -532,7 +542,6 @@ export interface ChannelSessionOps {
   ): Promise<ChannelSessionStatus>;
   getStatus(input: ChannelTenantScope & { sessionRef: string }): Promise<ChannelSessionStatus>;
   disconnect(input: ChannelTenantScope & { sessionRef: string }): Promise<void>;
-  delete(input: ChannelTenantScope & { sessionRef: string }): Promise<void>;
 }
 
 /** Definição aprovada, na forma NEUTRA — sem o vocabulário de nenhum provider. */

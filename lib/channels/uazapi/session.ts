@@ -45,34 +45,74 @@ function resumo(
   };
 }
 
+/**
+ * A conexão ATIVA da organização — a que a tela mostra e opera.
+ *
+ * Só a ativa: a linha excluída fica arquivada (para o histórico de conversas não
+ * perder o canal), e devolvê-la aqui fazia a conexão removida continuar na tela,
+ * com botões que respondem "Este canal foi excluído".
+ */
 export async function findUazapiSession(
   admin: SupabaseClient,
   organizationId: string,
   basePublicUrl: string,
 ): Promise<UazapiSessionSummary | null> {
-  const query = () =>
+  const base = (colunas: string) =>
     admin
       .from("channel_sessions")
-      .select(`${COLUNAS}, ${ARCHIVED_AT}`)
+      .select(colunas)
       .eq("organization_id", organizationId)
-      .eq("provider", CHANNEL_PROVIDER_UAZAPI)
-      .order("archived_at", { ascending: true, nullsFirst: true })
-      .order("created_at", { ascending: false })
-      .limit(1);
-  const { data, error } = await queryTolerantToMissingArchived(query, () =>
-    admin
-      .from("channel_sessions")
-      .select(COLUNAS)
-      .eq("organization_id", organizationId)
-      .eq("provider", CHANNEL_PROVIDER_UAZAPI)
-      .order("created_at", { ascending: false })
-      .limit(1),
+      .eq("provider", CHANNEL_PROVIDER_UAZAPI);
+  const { data, error } = await queryTolerantToMissingArchived(
+    () =>
+      base(`${COLUNAS}, ${ARCHIVED_AT}`)
+        .is("archived_at", null)
+        .order("created_at", { ascending: false })
+        .limit(1),
+    () => base(COLUNAS).order("created_at", { ascending: false }).limit(1),
   );
   if (error) throw new Error(`uazapi_session_lookup_failed: ${error.message}`);
-  return resumo((data as Record<string, unknown>[] | null)?.[0] ?? null, basePublicUrl);
+  return resumo((data as unknown as Record<string, unknown>[] | null)?.[0] ?? null, basePublicUrl);
 }
 
-/** Valida, cifra e persiste uma sessão. A organização vem sempre do guard. */
+/** Linha arquivada DESTA instância na organização: reconectá-la a desarquiva. */
+async function arquivadaDaInstancia(
+  admin: SupabaseClient,
+  organizationId: string,
+  serverUrl: string,
+  instanceId: string,
+): Promise<{ id: string } | null> {
+  const { data, error } = await admin
+    .from("channel_sessions")
+    .select("id")
+    .eq("organization_id", organizationId)
+    .eq("provider", CHANNEL_PROVIDER_UAZAPI)
+    .eq("uazapi_server_url", serverUrl)
+    .eq("uazapi_instance_id", instanceId)
+    .not("archived_at", "is", null)
+    .order("archived_at", { ascending: false })
+    .limit(1);
+  if (error) return null;
+  const linha = (data as { id: string }[] | null)?.[0];
+  return linha ? { id: String(linha.id) } : null;
+}
+
+/**
+ * Valida, cifra e persiste uma sessão. A organização vem sempre do guard.
+ *
+ * Qual linha recebe a credencial:
+ *  - há conexão ativa: ELA, sempre — mesma instância (token trocado no painel) ou
+ *    outra (a instância anterior expirou ou foi trocada). A linha é o canal da
+ *    organização, com o acesso da IA e o histórico ligados a ela; a instância é
+ *    o que está por trás, como a sessão que se re-pareia no canal por QR;
+ *  - não há ativa, mas a organização já usou ESTA instância: a linha arquivada
+ *    volta;
+ *  - nenhuma das duas: linha nova.
+ *
+ * Trocar de instância com o número conectado é recusado: a troca derrubaria o
+ * atendimento em silêncio. Quem opera desconecta primeiro — e desconectar não
+ * depende do token antigo estar vivo.
+ */
 export async function salvarUazapiSession(
   admin: SupabaseClient,
   input: {
@@ -90,15 +130,24 @@ export async function salvarUazapiSession(
   });
   if (!validacao.ok) return validacao;
 
-  const encontrada = await findUazapiSession(admin, input.organizationId, input.basePublicUrl);
-  if (encontrada && !encontrada.archivedAt && encontrada.instanceId !== validacao.instanceId) {
+  const ativa = await findUazapiSession(admin, input.organizationId, input.basePublicUrl);
+  const outraInstancia =
+    ativa !== null &&
+    (ativa.instanceId !== validacao.instanceId || ativa.serverUrl !== validacao.serverUrl);
+  if (ativa && outraInstancia && ativa.status === "WORKING") {
     return {
       ok: false,
-      motivo:
-        "Esta organização já tem uma instância conectada. Desconecte a atual antes de trocar.",
+      motivo: "O número atual está conectado. Desconecte-o antes de trocar de instância.",
     };
   }
-  const existente = encontrada?.instanceId === validacao.instanceId ? encontrada : null;
+  const existente =
+    ativa ??
+    (await arquivadaDaInstancia(
+      admin,
+      input.organizationId,
+      validacao.serverUrl,
+      validacao.instanceId,
+    ));
 
   const tokenEncrypted = await encryptWebhookSecret(admin, input.token.trim());
   // O endpoint de entrada usa o token de caminho opaco como autenticação. A
@@ -170,10 +219,16 @@ export async function salvarUazapiSession(
         .select(`${COLUNAS}, ${ARCHIVED_AT}`)
         .single();
   if (saved.error || !saved.data) {
+    // Duas travas dão 23505 aqui, e a mensagem do Postgres nomeia o índice: a
+    // instância ativa em outra organização, ou o número já ligado a outro canal
+    // ativo DESTA organização (o mesmo aparelho pareado por QR, por exemplo).
+    const travaDoNumero =
+      saved.error?.code === "23505" && /phone/i.test(saved.error.message ?? "");
     return {
       ok: false,
-      motivo:
-        saved.error?.code === "23505"
+      motivo: travaDoNumero
+        ? "Este número já está conectado em outro canal ativo desta organização. Remova o outro canal para usá-lo aqui."
+        : saved.error?.code === "23505"
           ? "Esta instância já está conectada a outra organização."
           : "Não foi possível salvar a conexão.",
     };

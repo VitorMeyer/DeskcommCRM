@@ -19,30 +19,53 @@ vi.mock("@/lib/webhooks/secrets", () => ({
 
 import { salvarUazapiSession } from "@/lib/channels/uazapi/session";
 
-type Op = { tabela: string; op: string; payload?: Record<string, unknown> };
+type Op = {
+  tabela: string;
+  op: string;
+  payload?: Record<string, unknown>;
+  eqs: Record<string, unknown>;
+};
 const ops: Op[] = [];
 let linhasExistentes: Record<string, unknown>[] = [];
-let erroDoInsert: { code: string } | null = null;
+let erroDaGravacao: { code: string; message?: string } | null = null;
 
-function chain(op: Op, resultado: () => unknown): Record<string, unknown> {
+/**
+ * Banco falso que APLICA os filtros: a pergunta "qual linha recebe a
+ * credencial?" depende de a consulta da ativa (`archived_at is null`) e a da
+ * arquivada da instância (`not archived_at is null`) devolverem coisas
+ * diferentes — um falso que ignora filtro responderia as duas com a mesma linha.
+ */
+function construtor(op: Op, resolver: (filtros: ((l: Record<string, unknown>) => boolean)[]) => unknown) {
   ops.push(op);
-  const proxy: Record<string, unknown> = new Proxy(
-    {},
-    {
-      get(_t, prop) {
-        if (prop === "then") return (ok: (v: unknown) => unknown) => ok(resultado());
-        if (prop === "single" || prop === "maybeSingle") {
-          return () => Promise.resolve(resultado());
-        }
-        return () => proxy;
-      },
+  const filtros: ((l: Record<string, unknown>) => boolean)[] = [];
+  const b: Record<string, unknown> = {
+    eq: (coluna: string, valor: unknown) => {
+      op.eqs[coluna] = valor;
+      filtros.push((l) => l[coluna] === valor);
+      return b;
     },
-  ) as Record<string, unknown>;
-  return proxy;
+    is: (coluna: string, valor: unknown) => {
+      filtros.push((l) => (l[coluna] ?? null) === valor);
+      return b;
+    },
+    not: (coluna: string, _op: string, valor: unknown) => {
+      filtros.push((l) => (l[coluna] ?? null) !== valor);
+      return b;
+    },
+    order: () => b,
+    limit: () => b,
+    select: () => b,
+    single: () => Promise.resolve(resolver(filtros)),
+    maybeSingle: () => Promise.resolve(resolver(filtros)),
+    then: (ok: (v: unknown) => unknown) => ok(resolver(filtros)),
+  };
+  return b;
 }
 
 const LINHA_SALVA = {
   id: "sess-1",
+  organization_id: "org-1",
+  provider: "uazapi",
   uazapi_instance_id: "inst-1",
   uazapi_server_url: "https://uazapi.example.test",
   uazapi_instance_token_encrypted: "enc:tok",
@@ -50,17 +73,28 @@ const LINHA_SALVA = {
   display_name: "Comercial",
   status: "WORKING",
   webhook_path_token: "caminho",
+  archived_at: null,
 };
 
 const admin = {
   from: (tabela: string) => ({
-    select: () => chain({ tabela, op: "select" }, () => ({ data: linhasExistentes, error: null })),
+    select: () =>
+      construtor({ tabela, op: "select", eqs: {} }, (filtros) => ({
+        data: linhasExistentes.filter((l) => filtros.every((f) => f(l))),
+        error: null,
+      })),
     insert: (payload: Record<string, unknown>) =>
-      chain({ tabela, op: "insert", payload }, () =>
-        erroDoInsert ? { data: null, error: erroDoInsert } : { data: LINHA_SALVA, error: null },
+      construtor({ tabela, op: "insert", payload, eqs: {} }, () =>
+        erroDaGravacao
+          ? { data: null, error: erroDaGravacao }
+          : { data: { ...LINHA_SALVA, ...payload, id: "sess-nova" }, error: null },
       ),
     update: (payload: Record<string, unknown>) =>
-      chain({ tabela, op: "update", payload }, () => ({ data: LINHA_SALVA, error: null })),
+      construtor({ tabela, op: "update", payload, eqs: {} }, () =>
+        erroDaGravacao
+          ? { data: null, error: erroDaGravacao }
+          : { data: { ...LINHA_SALVA, ...payload }, error: null },
+      ),
   }),
 } as never;
 
@@ -88,7 +122,7 @@ let fetchSpy: MockInstance<typeof fetch>;
 beforeEach(() => {
   ops.length = 0;
   linhasExistentes = [];
-  erroDoInsert = null;
+  erroDaGravacao = null;
   fetchSpy = vi
     .spyOn(globalThis, "fetch")
     .mockImplementation(async (url) =>
@@ -147,29 +181,94 @@ describe("salvarUazapiSession", () => {
     expect(ops.some((o) => o.op === "insert" || o.op === "update")).toBe(false);
   });
 
-  it("organização com OUTRA instância ativa não troca em silêncio", async () => {
-    linhasExistentes = [{ ...LINHA_SALVA, uazapi_instance_id: "outra-inst", archived_at: null }];
+  it("OUTRA instância com o número atual CONECTADO não troca em silêncio", async () => {
+    linhasExistentes = [{ ...LINHA_SALVA, uazapi_instance_id: "outra-inst", status: "WORKING" }];
     const r = await salvarUazapiSession(admin, ENTRADA);
-    expect(r).toMatchObject({ ok: false, motivo: expect.stringContaining("já tem uma instância") });
+    expect(r).toEqual({
+      ok: false,
+      motivo: "O número atual está conectado. Desconecte-o antes de trocar de instância.",
+    });
     expect(chamadaDoWebhook()).toBeUndefined(); // nem chegou a mexer no servidor remoto
     expect(ops.some((o) => o.op === "insert" || o.op === "update")).toBe(false);
   });
 
-  it("a MESMA instância reconectada atualiza a linha e desarquiva", async () => {
+  it("instância anterior caída: o token de OUTRA instância troca a conexão NA MESMA LINHA", async () => {
+    // O beco do primeiro teste vivo: a instância gratuita expirou, o token morreu,
+    // e a tela recusava o token novo até a antiga ser desconectada — o que exigia
+    // o token morto.
+    linhasExistentes = [
+      { ...LINHA_SALVA, uazapi_instance_id: "inst-expirada", status: "FAILED", phone_number: null },
+    ];
+    const r = await salvarUazapiSession(admin, ENTRADA);
+    expect(r.ok).toBe(true);
+
+    const update = ops.find((o) => o.op === "update")!;
+    expect(update.eqs).toMatchObject({ organization_id: "org-1", id: "sess-1" });
+    expect(update.payload).toMatchObject({
+      uazapi_instance_id: "inst-1",
+      uazapi_instance_token_encrypted: "enc:tok",
+      webhook_path_token: "caminho",
+      status: "WORKING",
+      archived_at: null,
+    });
+    expect(ops.some((o) => o.op === "insert")).toBe(false);
+    expect(chamadaDoWebhook()).toBeDefined(); // o webhook vai para a instância NOVA
+  });
+
+  it("a MESMA instância com token novo (trocado no painel) atualiza a linha, mesmo conectada", async () => {
+    linhasExistentes = [{ ...LINHA_SALVA, uazapi_instance_token_encrypted: "enc:velho" }];
+    const r = await salvarUazapiSession(admin, { ...ENTRADA, token: "tok" });
+    expect(r.ok).toBe(true);
+    const update = ops.find((o) => o.op === "update")!;
+    expect(update.eqs).toMatchObject({ id: "sess-1" });
+    expect(update.payload).toMatchObject({ uazapi_instance_token_encrypted: "enc:tok" });
+  });
+
+  it("a MESMA instância reconectada depois de removida desarquiva a linha dela", async () => {
     linhasExistentes = [{ ...LINHA_SALVA, archived_at: "2026-09-01T00:00:00Z" }];
     const r = await salvarUazapiSession(admin, ENTRADA);
     expect(r.ok).toBe(true);
     const update = ops.find((o) => o.op === "update")!;
+    expect(update.eqs).toMatchObject({ organization_id: "org-1", id: "sess-1" });
     expect(update.payload).toMatchObject({ archived_at: null, uazapi_instance_id: "inst-1" });
     expect(ops.some((o) => o.op === "insert")).toBe(false);
   });
 
+  it("linha arquivada de OUTRA instância não volta: a conexão nova é linha nova", async () => {
+    linhasExistentes = [
+      { ...LINHA_SALVA, uazapi_instance_id: "outra-inst", archived_at: "2026-09-01T00:00:00Z" },
+    ];
+    const r = await salvarUazapiSession(admin, ENTRADA);
+    expect(r.ok).toBe(true);
+    expect(ops.some((o) => o.op === "update")).toBe(false);
+    expect(ops.find((o) => o.op === "insert")?.payload).toMatchObject({
+      uazapi_instance_id: "inst-1",
+    });
+  });
+
   it("instância já ligada a OUTRA organização é recusada pelo índice único, com texto claro", async () => {
-    erroDoInsert = { code: "23505" };
+    erroDaGravacao = {
+      code: "23505",
+      message:
+        'duplicate key value violates unique constraint "channel_sessions_uazapi_instance_id_ativo_unique"',
+    };
     const r = await salvarUazapiSession(admin, ENTRADA);
     expect(r).toEqual({
       ok: false,
       motivo: "Esta instância já está conectada a outra organização.",
+    });
+  });
+
+  it("número já ligado a outro canal desta organização é dito como tal, não como outra organização", async () => {
+    erroDaGravacao = {
+      code: "23505",
+      message:
+        'duplicate key value violates unique constraint "channel_sessions_phone_per_org_unique"',
+    };
+    const r = await salvarUazapiSession(admin, ENTRADA);
+    expect(r).toMatchObject({
+      ok: false,
+      motivo: expect.stringContaining("já está conectado em outro canal ativo desta organização"),
     });
   });
 

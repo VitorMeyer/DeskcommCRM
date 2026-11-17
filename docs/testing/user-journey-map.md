@@ -4386,25 +4386,25 @@ celular faz o papel do cliente; (d) um grupo de teste com o número da empresa e
 
 | # | Caso | Expectativa | Resultado |
 |---|------|-------------|-----------|
-| J69.1 `[P0]` | Ligar o módulo em Administração › Sistema | a aba "Uazapi" aparece em Conexões; desligado, ela some e `GET /api/v1/channels/hosted-session` responde 404 || PASS (2026-11-17, `026a673`) |
+| J69.1 `[P0]` | Ligar o módulo em Administração › Sistema | a aba "Uazapi" aparece em Conexões; desligado, ela some e `GET /api/v1/channels/hosted-session` responde 404 | PASS (2026-11-17, `026a673`) |
 | J69.2 `[P0]` | Colar URL e token **errado** | "Token recusado pelo servidor." escrito na aba; nada gravado | |
-| J69.3 `[P0]` | Colar URL e token certos | "Servidor validado e conexão salva."; a aba mostra a conexão sem número || PASS (2026-11-17) |
-| J69.4 `[P0]` | Gerar QR Code e ler pelo celular da empresa | enquanto o QR está na tela, o estado **não** é "conectado"; depois de ler, conectado com o número || PASS depois de dois consertos (2026-11-17): a conexão ficou WORKING **sem número** — o webhook gravava só o status e a tela parava de consultar no primeiro WORKING (`54cf8f933`), e `GET /instance/status` real traz `status.jid` em TEXTO, não o `{ user }` da especificação (`2a15cb42f`). Provado em `2a15cb4` |
+| J69.3 `[P0]` | Colar URL e token certos | "Servidor validado e conexão salva."; a aba mostra a conexão sem número | PASS (2026-11-17) |
+| J69.4 `[P0]` | Gerar QR Code e ler pelo celular da empresa | enquanto o QR está na tela, o estado **não** é "conectado"; depois de ler, conectado com o número | PASS depois de dois consertos (2026-11-17): a conexão ficou WORKING **sem número** — o webhook gravava só o status e a tela parava de consultar no primeiro WORKING (`54cf8f933`), e `GET /instance/status` real traz `status.jid` em TEXTO, não o `{ user }` da especificação (`2a15cb42f`). Provado em `2a15cb4` |
 | J69.5 `[P1]` | Parear por código (telefone) em vez de QR | o código aparece e, digitado no celular, conecta | |
 | J69.6 `[P1]` | A instância já tinha outro webhook no painel da uazapi (ex.: uma automação) | depois de conectar, o webhook dela continua lá, ao lado do do CRM | |
-| J69.7 `[P0]` | O cliente manda "oi" | conversa nova no Inbox, com o nome e o telefone do cliente || PASS (2026-11-17): nome em `display_name`, telefone e LID; lead criado pela entrada |
-| J69.8 `[P0]` | O atendente responde pelo Inbox | chega no celular do cliente; os tiques passam a entregue e lido, sem voltar atrás || PASS (2026-11-17): entregue em 2 s, lida em 46 s; o `Delivered` chegou 3 vezes e foi aplicado uma |
-| J69.9 `[P0]` | O dono responde **pelo celular da empresa** | a mensagem entra na MESMA conversa do cliente (nenhum contato novo com o número da empresa) e a IA pausa nessa conversa || PASS (2026-11-17): enviada, `external_device`, mesma conversa, nenhum contato novo; IA pausada por 1 h (log `[atendimento-manual]`) |
-| J69.10 `[P1]` | O cliente manda foto, áudio e documento | os três aparecem e abrem; o áudio toca || PASS com conserto (2026-11-17): foto, áudio e documento copiados com o tamanho exato; o documento ficava **sem nome** (`552efd20b`). Descrição/transcrição por IA pendentes por falta de chave de IA (esperado) |
-| J69.11 `[P1]` | O atendente manda foto, documento, áudio gravado, contato e localização | os cinco chegam no celular do cliente | |
-| J69.12 `[P1]` | O cliente **edita** uma mensagem | a conversa mostra o texto novo na mesma bolha; nenhuma bolha duplicada || PASS (2026-11-17): mesma linha, `edited_at` carimbado |
-| J69.13 `[P1]` | O cliente **reage** com 👍 a uma mensagem nossa | a reação aparece sobre a mensagem; tirar a reação a remove || PASS (2026-11-17): a reação entrou ligada ao alvo, e tirá-la a removeu |
+| J69.7 `[P0]` | O cliente manda "oi" | conversa nova no Inbox, com o nome e o telefone do cliente | PASS (2026-11-17): nome em `display_name`, telefone e LID; lead criado pela entrada |
+| J69.8 `[P0]` | O atendente responde pelo Inbox | chega no celular do cliente; os tiques passam a entregue e lido, sem voltar atrás | PASS (2026-11-17): entregue em 2 s, lida em 46 s; o `Delivered` chegou 3 vezes e foi aplicado uma |
+| J69.9 `[P0]` | O dono responde **pelo celular da empresa** | a mensagem entra na MESMA conversa do cliente (nenhum contato novo com o número da empresa) e a IA pausa nessa conversa | PASS (2026-11-17): enviada, `external_device`, mesma conversa, nenhum contato novo; IA pausada por 1 h (log `[atendimento-manual]`) |
+| J69.10 `[P1]` | O cliente manda foto, áudio e documento | os três aparecem e abrem; o áudio toca | PASS com conserto (2026-11-17): foto, áudio e documento copiados com o tamanho exato; o documento ficava **sem nome** (`552efd20b`). Descrição/transcrição por IA pendentes por falta de chave de IA (esperado) |
+| J69.11 `[P1]` | O atendente manda foto, documento, áudio gravado, contato e localização | os cinco chegam no celular do cliente | PASS parcial (2026-11-17, `552efd2`): imagem (png), áudio gravado (ogg/opus), PDF e contato saíram e foram **lidos** pelo cliente; localização ainda não testada |
+| J69.12 `[P1]` | O cliente **edita** uma mensagem | a conversa mostra o texto novo na mesma bolha; nenhuma bolha duplicada | PASS (2026-11-17): mesma linha, `edited_at` carimbado |
+| J69.13 `[P1]` | O cliente **reage** com 👍 a uma mensagem nossa | a reação aparece sobre a mensagem; tirar a reação a remove | PASS (2026-11-17): a reação entrou ligada ao alvo, e tirá-la a removeu |
 | J69.14 `[P1]` | O atendente reage pelo Inbox | a reação chega no celular do cliente | |
-| J69.15 `[P1]` | O cliente **apaga para todos** | a mensagem fica no histórico, marcada como apagada || PASS (2026-11-17): `revoked_at` carimbado, a linha permanece |
+| J69.15 `[P1]` | O cliente **apaga para todos** | a mensagem fica no histórico, marcada como apagada | PASS (2026-11-17): `revoked_at` carimbado, a linha permanece |
 | J69.16 `[P0]` | Alguém escreve no grupo de teste, **sem** o grupo ligado | nada aparece no Inbox; nenhum contato novo; a IA não responde | PASS (2026-11-17): mensagem de outro grupo do número, não ligado, não criou conversa nem contato |
 | J69.17 `[P1]` | Conexões › Grupos lista os grupos do número; ligar o grupo de teste | mensagens do grupo entram numa conversa do GRUPO, com o nome de quem escreveu em cada bolha; a IA não responde | PASS (2026-11-17): o grupo apareceu na lista pela API real, ligou (auditado), o filtro do webhook NA INSTÂNCIA trocou para receber grupos, e a mensagem entrou na conversa do grupo com o autor em `group_sender`; nenhum despacho de IA |
 | J69.18 `[P2]` | Ligar "IA responde" naquele grupo | a IA passa a responder no grupo | |
-| J69.19 `[P1]` | Desligar o último grupo ligado | mensagens de grupo param de chegar | |
+| J69.19 `[P1]` | Desligar o último grupo ligado | mensagens de grupo param de chegar | PASS (2026-11-17): desligado e auditado; o filtro do webhook NA INSTÂNCIA voltou a `wasSentByApi, isGroupYes`, e nenhuma mensagem de grupo entrou depois |
 | J69.20 `[P0]` | Agente de IA publicado, com acesso a este número | responde o cliente por este canal, com "digitando…" antes; caso que atravessa o agente mede o PAR (a tela + a ferramenta chamada direto, com o mesmo texto) | |
 | J69.21 `[P1]` | Desconectar e reconectar por QR | o estado muda na hora; reconectado, as conversas seguem nas mesmas linhas | |
 | J69.22 `[P1]` | Trocar o token por o de OUTRA instância, com o número desconectado | a conexão continua sendo a mesma linha (histórico e acesso da IA preservados) | |

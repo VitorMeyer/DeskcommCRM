@@ -27,6 +27,12 @@ export interface UazapiCredentials {
   instanceId: string;
   serverUrl: string;
   token: string;
+  /**
+   * O token do caminho de entrada desta conexão — é por ele que o webhook do CRM
+   * é reconhecido dentro da instância (`webhook-remoto.ts`). Não é segredo do
+   * serviço: é o nosso endereço.
+   */
+  webhookPathToken: string | null;
 }
 
 /**
@@ -76,7 +82,7 @@ export async function resolveUazapiCreds(
   const base = () =>
     admin
       .from("channel_sessions")
-      .select("id, uazapi_instance_id, uazapi_server_url, uazapi_instance_token_encrypted")
+      .select("id, uazapi_instance_id, uazapi_server_url, uazapi_instance_token_encrypted, webhook_path_token")
       .eq("organization_id", organizationId)
       .eq("uazapi_instance_id", instanceId);
   const { data, error } = await queryTolerantToMissingArchived(
@@ -94,6 +100,7 @@ export async function resolveUazapiCreds(
     uazapi_instance_id?: string | null;
     uazapi_server_url?: string | null;
     uazapi_instance_token_encrypted?: unknown;
+    webhook_path_token?: string | null;
   } | null;
   if (
     !linha?.uazapi_instance_id ||
@@ -111,5 +118,6 @@ export async function resolveUazapiCreds(
     instanceId: linha.uazapi_instance_id,
     serverUrl: linha.uazapi_server_url,
     token,
+    webhookPathToken: linha.webhook_path_token ?? null,
   };
 }

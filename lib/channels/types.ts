@@ -661,10 +661,10 @@ export interface ChannelAdapter {
   }): Promise<ContatoDoAparelho[]>;
 
   /** Grupos do número. Ausente = o canal não lista grupos. */
-  listGroups?(input: { sessionRef: string }): Promise<ChannelGroup[]>;
+  listGroups?(input: ChannelTenantScope & { sessionRef: string }): Promise<ChannelGroup[]>;
 
   /** Liga/desliga o recebimento de grupos na sessão; `true` só com a troca confirmada. */
-  setGroupIntake?(input: { sessionRef: string; receive: boolean }): Promise<boolean>;
+  setGroupIntake?(input: ChannelTenantScope & { sessionRef: string; receive: boolean }): Promise<boolean>;
 
   /**
    * Envia uma DEFINIÇÃO APROVADA — o único caminho de volta quando a janela de

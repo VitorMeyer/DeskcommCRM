@@ -95,14 +95,20 @@ export interface GruposDb {
 
 export interface DepsDeGrupos {
   db: GruposDb;
-  listGroups(provider: ChannelProvider, sessionRef: string): Promise<ChannelGroup[]>;
+  /** `organizationId` vai junto: há canal cuja credencial é por organização. */
+  listGroups(provider: ChannelProvider, sessionRef: string, organizationId: string): Promise<ChannelGroup[]>;
   /**
    * PODE LANÇAR (timeout/rede) mesmo declarando `Promise<boolean>` — o contrato
    * é "eu tento" e a exceção é um resultado, não um bug de tipo. Quem chama
    * (`alternarGrupo`) trata a exceção exatamente como `false`: nada fica ligado
    * sem estar confirmado.
    */
-  setGroupIntake(provider: ChannelProvider, sessionRef: string, receive: boolean): Promise<boolean>;
+  setGroupIntake(
+    provider: ChannelProvider,
+    sessionRef: string,
+    receive: boolean,
+    organizationId: string,
+  ): Promise<boolean>;
   audit(entry: {
     action: string;
     organizationId: string;
@@ -127,7 +133,7 @@ export async function listarGruposDoNumero(
 ): Promise<GrupoDoNumero[]> {
   const s = await sessaoComGrupos(deps, e.organizationId, e.channelSessionId);
   const [doCanal, gravados] = await Promise.all([
-    deps.listGroups(s.provider, s.sessionRef),
+    deps.listGroups(s.provider, s.sessionRef, e.organizationId),
     deps.db.listarLinhas(e.organizationId, e.channelSessionId),
   ]);
   const porId = new Map(gravados.map((l) => [l.group_chat_id, l]));
@@ -216,7 +222,7 @@ async function ligarGrupo(deps: DepsDeGrupos, s: SessaoComGrupos, e: AlternarInp
   // as duas coisas significam a mesma coisa aqui: sem confirmação, nada liga.
   let confirmou: boolean;
   try {
-    confirmou = await deps.setGroupIntake(s.provider, s.sessionRef, true);
+    confirmou = await deps.setGroupIntake(s.provider, s.sessionRef, true, e.organizationId);
   } catch {
     confirmou = false;
   }
@@ -275,7 +281,7 @@ async function desligarGrupo(deps: DepsDeGrupos, s: SessaoComGrupos, e: Alternar
   let motivoFalhaDoFiltro: string | null = null;
   if (precisaDesligarFiltro) {
     try {
-      filtroDesligado = await deps.setGroupIntake(s.provider, s.sessionRef, false);
+      filtroDesligado = await deps.setGroupIntake(s.provider, s.sessionRef, false, e.organizationId);
       if (!filtroDesligado) motivoFalhaDoFiltro = "recusado_pelo_whatsapp";
     } catch (err) {
       filtroDesligado = false;
@@ -418,14 +424,14 @@ export function criarDepsDeGrupos(admin: SupabaseClient): DepsDeGrupos {
         return data as { id: string } | null;
       },
     },
-    async listGroups(provider, sessionRef) {
+    async listGroups(provider, sessionRef, organizationId) {
       const adapter = getAdapter(provider);
       if (!adapter.listGroups) throw new GrupoError("canal_sem_grupos");
-      return adapter.listGroups({ sessionRef });
+      return adapter.listGroups({ organizationId, sessionRef });
     },
-    async setGroupIntake(provider, sessionRef, receive) {
+    async setGroupIntake(provider, sessionRef, receive, organizationId) {
       const adapter = getAdapter(provider);
-      return adapter.setGroupIntake ? adapter.setGroupIntake({ sessionRef, receive }) : false;
+      return adapter.setGroupIntake ? adapter.setGroupIntake({ organizationId, sessionRef, receive }) : false;
     },
     async audit(entry) {
       await auditReal({

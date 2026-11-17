@@ -28,6 +28,8 @@ type Op = {
 const ops: Op[] = [];
 let linhasExistentes: Record<string, unknown>[] = [];
 let erroDaGravacao: { code: string; message?: string } | null = null;
+/** Quantos grupos a conexão já tem ligados em Conexões › Grupos. */
+let gruposLigados = 0;
 
 /**
  * Banco falso que APLICA os filtros: a pergunta "qual linha recebe a
@@ -79,10 +81,12 @@ const LINHA_SALVA = {
 const admin = {
   from: (tabela: string) => ({
     select: () =>
-      construtor({ tabela, op: "select", eqs: {} }, (filtros) => ({
-        data: linhasExistentes.filter((l) => filtros.every((f) => f(l))),
-        error: null,
-      })),
+      tabela === "channel_session_groups"
+        ? construtor({ tabela, op: "select", eqs: {} }, () => ({ data: null, count: gruposLigados, error: null }))
+        : construtor({ tabela, op: "select", eqs: {} }, (filtros) => ({
+            data: linhasExistentes.filter((l) => filtros.every((f) => f(l))),
+            error: null,
+          })),
     insert: (payload: Record<string, unknown>) =>
       construtor({ tabela, op: "insert", payload, eqs: {} }, () =>
         erroDaGravacao
@@ -123,16 +127,22 @@ beforeEach(() => {
   ops.length = 0;
   linhasExistentes = [];
   erroDaGravacao = null;
+  gruposLigados = 0;
   fetchSpy = vi
     .spyOn(globalThis, "fetch")
-    .mockImplementation(async (url) =>
-      String(url).endsWith("/webhook") ? new Response("{}", { status: 200 }) : statusDaInstancia(),
+    .mockImplementation(async (url, init) =>
+      !String(url).endsWith("/webhook")
+        ? statusDaInstancia()
+        : init?.method === "POST"
+          ? new Response("[]", { status: 200 })
+          : new Response("[]", { status: 200 }), // a instância ainda sem webhook nenhum
     );
 });
 afterEach(() => vi.restoreAllMocks());
 
+/** A ESCRITA do webhook (a leitura da lista vem antes, com GET). */
 const chamadaDoWebhook = () =>
-  fetchSpy.mock.calls.find(([url]) => String(url).endsWith("/webhook"));
+  fetchSpy.mock.calls.find(([url, init]) => String(url).endsWith("/webhook") && init?.method === "POST");
 
 describe("salvarUazapiSession", () => {
   it("grava a linha da organização com o token CIFRADO e o número só em dígitos", async () => {
@@ -161,15 +171,28 @@ describe("salvarUazapiSession", () => {
     expect(init?.redirect).toBe("error");
     const corpo = JSON.parse(String(init?.body));
     expect(corpo).toMatchObject({
+      // `add`, não o modo simples: o webhook de outra automação do cliente fica.
+      action: "add",
       enabled: true,
       url: ENTRADA.webhookUrl,
-      excludeMessages: ["wasSentByApi"],
+      // Conexão nova não tem grupo ligado: o servidor nem entrega mensagem de grupo.
+      excludeMessages: ["wasSentByApi", "isGroupYes"],
     });
     expect(corpo.events).toEqual(["messages", "messages_update", "connection"]);
     expect(corpo.events).not.toContain("presence");
     // a ordem importa: o estado `connected` nunca promete entrada que falhou
-    const ordem = fetchSpy.mock.calls.map(([u]) => String(u).split("/").pop());
-    expect(ordem).toEqual(["status", "webhook"]);
+    const ordem = fetchSpy.mock.calls.map(([u, i]) => `${i?.method ?? "GET"} ${String(u).split("/").pop()}`);
+    expect(ordem).toEqual(["GET status", "GET webhook", "POST webhook"]);
+    expect(ops.findIndex((o) => o.op === "insert")).toBeGreaterThan(-1);
+  });
+
+  it("trocar o token de uma conexão com grupo LIGADO mantém o recebimento de grupos", async () => {
+    linhasExistentes = [{ ...LINHA_SALVA }];
+    gruposLigados = 2;
+    const r = await salvarUazapiSession(admin, ENTRADA);
+    expect(r.ok).toBe(true);
+    const corpo = JSON.parse(String(chamadaDoWebhook()![1]?.body));
+    expect(corpo.excludeMessages).toEqual(["wasSentByApi"]);
   });
 
   it("webhook recusado pelo servidor: NADA é gravado", async () => {

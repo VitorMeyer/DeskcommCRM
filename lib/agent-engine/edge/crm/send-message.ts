@@ -1,5 +1,6 @@
 import { assertAgentOperationPg, type AgentOperationContext } from '@/lib/ai/agents/operation';
 import { assertApprovedReplyPg, type ApprovedReplyContext } from '@/lib/ai/replies/delivery';
+import { instanteDoBanco } from '@/lib/tempo/agora';
 import { assertMeetingDeliveryPg, type MeetingDeliveryContext } from '@/lib/agenda/meet-delivery';
 import type { JobClaim } from '../../queue/claim';
 import { assertAgendaEffectPg } from '@/lib/agenda/efeito';
@@ -376,10 +377,7 @@ export async function sendTurnMessage(
     return {
       id: message.id,
       status: message.status,
-      retryAfterAt:
-        typeof message.metadata?.retry_after_at === 'string'
-          ? message.metadata.retry_after_at
-          : null,
+      retryAfterAt: instanteDoBanco(message.metadata?.retry_after_at),
       retryable: message.metadata?.retry_strategy !== 'manual',
     };
   });

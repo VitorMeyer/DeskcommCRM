@@ -1,5 +1,6 @@
 import { ApiError } from "@/lib/api/types";
 import { OrgNaoOperanteError } from "@/lib/organizacao/operante";
+import { instanteDoBanco } from "@/lib/tempo/agora";
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Queryable } from "../../queue/queue";
@@ -50,7 +51,7 @@ function lerMensagemDoLedger(row: MessageRetryRow): LedgerMessage {
   return {
     id: row.id,
     status: row.status,
-    retryAfterAt: row.retry_after_at,
+    retryAfterAt: instanteDoBanco(row.retry_after_at),
     retryable: row.retry_strategy !== "manual",
   };
 }
@@ -314,8 +315,8 @@ export function supabaseSendLedger(db: SupabaseClient): LedgerStore {
         return lerMensagemDoLedger({
           id: linha.id,
           status: linha.status,
-          retry_after_at:
-            typeof metadata?.retry_after_at === "string" ? metadata.retry_after_at : null,
+          // Texto do jsonb, mas a régua é a mesma de toda leitura de data do banco.
+          retry_after_at: instanteDoBanco(metadata?.retry_after_at),
           retry_strategy:
             typeof metadata?.retry_strategy === "string" ? metadata.retry_strategy : null,
         });

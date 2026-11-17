@@ -6,7 +6,9 @@ import { encryptWebhookSecret } from "@/lib/webhooks/secrets";
 
 import { CHANNEL_PROVIDER_UAZAPI } from "../capabilities";
 import { queryTolerantToMissingArchived, ARCHIVED_AT } from "../archived";
+import { requisitarNo } from "./http";
 import { validarCredenciaisUazapi } from "./validate-credentials";
+import { registrarWebhookDaConexao } from "./webhook-remoto";
 
 export interface UazapiSessionSummary {
   id: string;
@@ -135,23 +137,19 @@ export async function salvarUazapiSession(
 
   // A configuração remota do webhook ocorre antes da gravação. Assim o estado
   // `connected` nunca promete entrada quando o registro no servidor falhou.
-  const webhook = await fetch(`${validacao.serverUrl}/webhook`, {
-    method: "POST",
-    redirect: "error",
-    headers: { token: input.token.trim(), "Content-Type": "application/json" },
-    body: JSON.stringify({
-      enabled: true,
-      url: input.webhookUrl,
-      // Sem `presence`: cada "digitando…" chegaria ao webhook e viraria uma linha
-      // no arquivo de webhooks, para um evento que o CRM ignora.
-      events: ["messages", "messages_update", "connection"],
-      excludeMessages: ["wasSentByApi"],
-      addUrlEvents: false,
-      addUrlTypesMessages: false,
-    }),
-    signal: AbortSignal.timeout(15_000),
-  }).catch(() => null);
-  if (!webhook?.ok) {
+  //
+  // Só o webhook DESTA instalação muda (`webhook-remoto.ts`): o de outra
+  // automação do cliente na mesma instância continua lá. Mensagem de grupo só
+  // chega se a conexão que recebe a credencial já tinha grupo ligado — numa
+  // conexão nova, nenhum, e o servidor nem as entrega.
+  const receberGrupos = existente
+    ? await temGrupoLigado(admin, input.organizationId, existente.id)
+    : false;
+  const webhookRegistrado = await registrarWebhookDaConexao(
+    requisitarNo({ serverUrl: validacao.serverUrl, token: input.token.trim() }),
+    { url: input.webhookUrl, receberGrupos },
+  ).catch(() => false);
+  if (!webhookRegistrado) {
     return {
       ok: false,
       motivo: "Não foi possível registrar o webhook no servidor. A conexão não foi salva.",
@@ -210,4 +208,23 @@ export async function salvarUazapiSession(
   return session
     ? { ok: true, session }
     : { ok: false, motivo: "Não foi possível ler a conexão salva." };
+}
+
+/**
+ * A conexão já tem grupo ligado em Conexões › Grupos? Leitura que falha = `false`:
+ * o grupo ligado volta a receber no próximo "ligar", que reconfere o filtro; o
+ * contrário (receber grupo sem ninguém ter ligado) é o erro que não se quer.
+ */
+async function temGrupoLigado(
+  admin: SupabaseClient,
+  organizationId: string,
+  channelSessionId: string,
+): Promise<boolean> {
+  const { count, error } = await admin
+    .from("channel_session_groups")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", organizationId)
+    .eq("channel_session_id", channelSessionId)
+    .eq("enabled", true);
+  return !error && typeof count === "number" && count > 0;
 }

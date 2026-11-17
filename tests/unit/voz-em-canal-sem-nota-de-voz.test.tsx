@@ -85,7 +85,7 @@ describe("matriz — quem entrega nota de voz da IA", () => {
 
   it("os canais de WhatsApp seguem falando — o conserto não cala quem entrega", () => {
     const quemFala = PROVIDERS_DE_MENSAGEM.filter((p) => CHANNEL_CAPABILITIES[p].voiceNote !== "none");
-    expect([...quemFala].sort()).toEqual(["datafy", "meta_cloud", "waha", "zernio"]);
+    expect([...quemFala].sort()).toEqual(["datafy", "meta_cloud", "uazapi", "waha", "zernio"]);
   });
 });
 

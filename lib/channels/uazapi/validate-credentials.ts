@@ -63,11 +63,9 @@ export async function validarCredenciaisUazapi(input: {
   const instanceId = texto(body?.instance?.id);
   if (!instanceId) return { ok: false, motivo: "O token não identificou uma instância válida." };
 
-  const status =
-    estadoDoCanalUazapi(
-      body?.instance?.status,
-      body?.status?.connected === true || body?.status?.loggedIn === true,
-    ) ?? "FAILED";
+  // `loggedIn`, não `connected`: com o QR na tela o socket já está aberto sem
+  // número autenticado (ver `statusDaSessao` no adapter).
+  const status = estadoDoCanalUazapi(body?.instance?.status, body?.status?.loggedIn === true) ?? "FAILED";
 
   return {
     ok: true,

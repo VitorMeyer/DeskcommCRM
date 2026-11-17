@@ -23,9 +23,12 @@ import {
   type UazapiCredentials,
 } from "../uazapi/credentials";
 import { estadoDoCanalUazapi } from "../uazapi/estado";
+import { requisitarNo, requisitarUazapi as requisitarHttp } from "../uazapi/http";
 import { parseRetryAfterMs } from "../uazapi/retry-after";
+import { caminhoDaConexao, definirRecebimentoDeGrupos } from "../uazapi/webhook-remoto";
 import type {
   ChannelAdapter,
+  ChannelGroup,
   ChannelHealth,
   ChannelSessionStatus,
   ChannelTenantScope,
@@ -71,10 +74,6 @@ type UazapiBody = {
   mimetype?: string;
 };
 
-function enderecoDaApi(serverUrl: string, path: string): string {
-  return `${serverUrl.replace(/\/+$/, "")}${path}`;
-}
-
 function detalheDoErro(body: UazapiBody, status: number): string {
   return (body.error ?? body.message ?? `http_${status}`).slice(0, 200);
 }
@@ -84,24 +83,16 @@ async function requisitarUazapi(
   path: string,
   init: RequestInit = {},
 ): Promise<{ response: Response; body: UazapiBody }> {
-  const response = await fetch(enderecoDaApi(creds.serverUrl, path), {
-    ...init,
-    redirect: "error",
-    headers: {
-      token: creds.token,
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
-      ...init.headers,
-    },
-    signal: init.signal ?? AbortSignal.timeout(15_000),
-  });
-  const body = (await response.json().catch(() => ({}))) as UazapiBody;
-  return { response, body };
+  const { response, body } = await requisitarHttp(creds, path, init);
+  const corpo = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+  return { response, body: corpo as UazapiBody };
 }
 
 function statusDaSessao(body: UazapiBody): ChannelSessionStatus {
-  const status =
-    estadoDoCanalUazapi(body.instance?.status, Boolean(body.status?.connected || body.status?.loggedIn)) ??
-    "FAILED";
+  // `loggedIn`, não `connected`: durante o QR o socket já está aberto
+  // (`connected`) sem número autenticado — tratar isso como conectado mostraria
+  // "WORKING" na tela antes de alguém ler o código.
+  const status = estadoDoCanalUazapi(body.instance?.status, body.status?.loggedIn === true) ?? "FAILED";
   const jid = body.status?.jid?.user?.replace(/\D/g, "") || null;
   return {
     status,
@@ -296,6 +287,50 @@ export const uazapiAdapter: ChannelAdapter = {
         { credencialComNome: true },
       );
     },
+  },
+
+  async listGroups(input): Promise<ChannelGroup[]> {
+    const creds = await credenciaisDaSessao(input);
+    const grupos: ChannelGroup[] = [];
+    // Paginado: um número com centenas de grupos não cabe numa resposta só, e a
+    // lista sem participantes é a leve (a tela só precisa de id e nome).
+    for (let offset = 0, pagina = 0; pagina < 20; pagina += 1) {
+      const body = (await exigirSucesso(creds, "/group/list", {
+        method: "POST",
+        body: JSON.stringify({ noParticipants: true, limit: 500, offset }),
+      })) as UazapiBody & { groups?: unknown; hasMore?: unknown; nextOffset?: unknown };
+      const lista = Array.isArray(body.groups) ? body.groups : [];
+      for (const bruto of lista) {
+        const g = bruto as { JID?: unknown; Name?: unknown };
+        if (typeof g.JID !== "string" || !g.JID.endsWith("@g.us")) continue;
+        const nome = typeof g.Name === "string" && g.Name.trim() ? g.Name.trim() : g.JID;
+        grupos.push({ chatId: g.JID, subject: nome });
+      }
+      if (body.hasMore !== true || typeof body.nextOffset !== "number") break;
+      offset = body.nextOffset;
+    }
+    return grupos;
+  },
+
+  async setGroupIntake(input): Promise<boolean> {
+    const creds = await credenciaisDaSessao(input);
+    if (!creds.webhookPathToken) return false;
+    return definirRecebimentoDeGrupos(requisitarNo(creds), {
+      caminho: caminhoDaConexao(creds.webhookPathToken),
+      receber: input.receive,
+    });
+  },
+
+  async sendReaction(input): Promise<{ externalId: string | null }> {
+    const creds = await credenciaisDaSessao(input);
+    // Só `id` e `text`: a API acha o chat pela mensagem; texto vazio remove a reação.
+    const body = await exigirSucesso(creds, "/message/react", {
+      method: "POST",
+      body: JSON.stringify({ id: input.externalId, text: input.emoji }),
+    });
+    // O `messageid` curto, a mesma forma que o webhook entrega — senão o eco
+    // (quando houver) e esta linha seriam duas reações.
+    return { externalId: body.messageid ?? null };
   },
 
   async checkHealth(input): Promise<ChannelHealth> {

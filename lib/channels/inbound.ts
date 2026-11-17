@@ -32,6 +32,9 @@ import {
   CHANNEL_PROVIDER_UAZAPI,
   CHANNEL_PROVIDER_ZERNIO,
 } from "./capabilities";
+import { criarIngestDeGrupoDb, gravarMensagemDeGrupo } from "@/lib/grupos/ingest";
+
+import { gravarReacaoDeMensagem } from "./reacao";
 import { canalUazapiLigado } from "./uazapi/credentials";
 import { lerEnvelopeUazapi, mensagemDeDesfecho } from "./uazapi/envelope";
 import { canalGraphParceiroLigado } from "./graph-parceiro/credentials";
@@ -439,6 +442,51 @@ async function uazapiInbound(
       if (desfecho === "aplicado") aplicadas += 1;
     }
     return { ok: true, body: { status: "revoked", updated: aplicadas } };
+  }
+  if (evento.kind === "edited") {
+    // A edição muda o texto da original (a anterior fica no metadata, pelo
+    // mesmo passo do outro canal intermediado). Original desconhecida = nada.
+    const desfecho = await aplicarEdicaoZernio(admin, input.session.organization_id, {
+      externalId: evento.externalId,
+      tipo: "edited",
+      body: evento.body,
+    });
+    return { ok: true, body: { status: "edited", updated: desfecho === "aplicado" ? 1 : 0 } };
+  }
+  if (evento.kind === "reaction") {
+    // O módulo ÚNICO de reação (#2797): linha ligada ao alvo, sem carimbar a
+    // conversa. O `external_id` gravado é o `messageid` curto nos dois lados
+    // (envio e webhook), então o alvo tem uma forma só e não precisa de sufixo.
+    const desfecho = await gravarReacaoDeMensagem(admin, {
+      organizationId: input.session.organization_id,
+      channelSessionId: input.session.id,
+      externalId: evento.reacao.externalId,
+      alvoExternalId: evento.reacao.alvoExternalId,
+      candidatosDoAlvo: [evento.reacao.alvoExternalId],
+      sufixoDoAlvo: null,
+      emoji: evento.reacao.emoji,
+      author: evento.reacao.author,
+      direction: evento.reacao.direction,
+      sentAt: evento.reacao.sentAt,
+      // O mesmo carimbo do canal por QR: a reação nunca sai pela API do CRM por aqui.
+      sentVia: "external_device",
+      canal: fonte.label,
+    });
+    // Falha de banco reprova a entrega: o serviço reentrega e o arquivo guarda o corpo.
+    if (desfecho.status === "falha") throw new Error(`uazapi_reaction_write_failed: ${desfecho.motivo}`);
+    return { ok: true, body: { status: "reaction", desfecho: desfecho.status } };
+  }
+  if (evento.kind === "group") {
+    // O caminho ÚNICO de grupo (`lib/grupos/ingest.ts`): só grava se o grupo
+    // estiver ligado em Conexões › Grupos; a conversa é do grupo, o participante
+    // fica em `metadata.group_sender`, e o banco emite `message.group_received`
+    // — IA, follow-up e automação não enxergam grupo (salvo `ia_responde`).
+    const desfecho = await gravarMensagemDeGrupo(criarIngestDeGrupoDb(admin), {
+      ...evento.entrada,
+      organizationId: input.session.organization_id,
+      channelSessionId: input.session.id,
+    });
+    return { ok: true, body: { status: "group", desfecho } };
   }
 
   const result = await ingestNormalizedInbound(admin, {

@@ -1,0 +1,42 @@
+{
+  "BaseUrl": "https://exemplo.invalid",
+  "EventType": "groups",
+  "event": {
+    "JID": "120363000000000002@g.us",
+    "Notify": "Grupo de teste 2",
+    "Sender": "5511900000003@s.whatsapp.net",
+    "SenderPN": "5511900000003@s.whatsapp.net",
+    "Timestamp": "2026-04-27T16:45:47Z",
+    "Name": null,
+    "Topic": null,
+    "Locked": null,
+    "Announce": null,
+    "Ephemeral": null,
+    "MembershipApprovalMode": null,
+    "Delete": null,
+    "Link": null,
+    "Unlink": null,
+    "NewInviteLink": null,
+    "PrevParticipantVersionID": "1777308333242541",
+    "ParticipantVersionID": "1777308346915212",
+    "JoinReason": "",
+    "Suspended": false,
+    "Unsuspended": false,
+    "UnknownChanges": null,
+    "Join": [
+      "5511900000001@s.whatsapp.net"
+    ],
+    "Leave": null,
+    "Promote": null,
+    "Demote": null,
+    "JoinLid": [
+      "900000000000001@lid"
+    ],
+    "sender_pn": "5511900000003@s.whatsapp.net",
+    "sender_lid": "900000000000003@lid"
+  },
+  "instanceName": "[removido]",
+  "owner": "5511900000003",
+  "token": "[removido]",
+  "type": "Group"
+}

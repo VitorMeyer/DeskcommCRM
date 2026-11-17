@@ -16,6 +16,25 @@ vi.mock("@/lib/channels/health", async (importOriginal) => ({
   sincronizarSaudeDaConexao: vi.fn(async () => "sem_mudanca"),
 }));
 
+// Grupo e reação têm caminho ÚNICO no produto, com testes próprios
+// (`lib/grupos/ingest.test.ts`, `lib/channels/reacao`): aqui o que se prende é
+// que o canal os CHAMA — e que o grupo nunca passa pelo fluxo individual.
+const grupos = vi.hoisted(() => ({
+  gravar: vi.fn(async (..._a: unknown[]) => "gravada" as string),
+}));
+vi.mock("@/lib/grupos/ingest", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  criarIngestDeGrupoDb: () => ({ marcador: "db-de-grupo" }),
+  gravarMensagemDeGrupo: (...a: unknown[]) => grupos.gravar(...a),
+}));
+const reacoes = vi.hoisted(() => ({
+  gravar: vi.fn(async (..._a: unknown[]) => ({ status: "gravada" }) as Record<string, unknown>),
+}));
+vi.mock("@/lib/channels/reacao", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  gravarReacaoDeMensagem: (...a: unknown[]) => reacoes.gravar(...a),
+}));
+
 import { handleInboundWebhook } from "@/lib/channels/inbound";
 
 const fixture = (name: string) => readFileSync(`tests/fixtures/uazapi/${name}.json`, "utf8");
@@ -182,5 +201,58 @@ describe("o que o webhook recusa ou ignora", () => {
     expect(
       await entrar(JSON.stringify({ EventType: "messages_update", event: { Type: "Read" } })),
     ).toMatchObject({ ok: false, code: "contrato_violado" });
+  });
+});
+
+describe("grupo, edição e reação (payloads reais)", () => {
+  beforeEach(() => {
+    grupos.gravar.mockClear();
+    reacoes.gravar.mockClear();
+    reacoes.gravar.mockImplementation(async () => ({ status: "gravada" }));
+  });
+
+  it("mensagem de grupo vai para o caminho de grupo — nunca cria contato nem conversa individual", async () => {
+    grupos.gravar.mockResolvedValueOnce("grupo_desligado");
+    const r = await entrar(fixture("messages-grupo-inbound-text"));
+    expect(r).toEqual({ ok: true, body: { status: "group", desfecho: "grupo_desligado" } });
+    expect(grupos.gravar).toHaveBeenCalledTimes(1);
+    expect(grupos.gravar.mock.calls[0]![1]).toMatchObject({
+      organizationId: "org-1",
+      channelSessionId: "sess-1",
+      groupChatId: "120363000000000001@g.us",
+      direction: "inbound",
+    });
+    expect(ops.filter((o) => ["contacts", "conversations", "messages"].includes(o.tabela))).toEqual([]);
+  });
+
+  it("a edição muda a mensagem ORIGINAL da organização, sem inserir linha", async () => {
+    const r = await entrar(fixture("messages-inbound-editada"));
+    expect(r).toEqual({ ok: true, body: { status: "edited", updated: 1 } });
+    const [upd] = atualizacoes("messages");
+    expect(upd!.payload).toMatchObject({ body: "Oi2" });
+    expect(doFiltro(upd!, "eq")).toEqual([
+      ["organization_id", "org-1"],
+      ["external_id", "AC98212CD4909DE6799E78D93A824A3F"],
+    ]);
+    expect(ops.filter((o) => o.op === "insert")).toEqual([]);
+  });
+
+  it("a reação vai para o módulo único, apontando o alvo pela forma que o envio grava", async () => {
+    const r = await entrar(fixture("messages-inbound-reacao"));
+    expect(r).toEqual({ ok: true, body: { status: "reaction", desfecho: "gravada" } });
+    expect(reacoes.gravar.mock.calls[0]![1]).toMatchObject({
+      organizationId: "org-1",
+      channelSessionId: "sess-1",
+      alvoExternalId: "AC24A7E68360C7E9A54F64AB85FAECE2",
+      candidatosDoAlvo: ["AC24A7E68360C7E9A54F64AB85FAECE2"],
+      sufixoDoAlvo: null,
+      emoji: "❤️",
+      direction: "inbound",
+    });
+  });
+
+  it("falha de banco na reação reprova a entrega (o serviço reentrega)", async () => {
+    reacoes.gravar.mockImplementationOnce(async () => ({ status: "falha", motivo: "x", codigo: null }));
+    await expect(entrar(fixture("messages-inbound-reacao"))).rejects.toThrow(/uazapi_reaction_write_failed/);
   });
 });

@@ -62,9 +62,18 @@ describe("canal uazapi — vocabulário e seam", () => {
     expect(migration).toContain("add column if not exists uazapi_instance_id");
     expect(migration).toMatch(/provider = 'uazapi' and uazapi_instance_id is not null/);
     expect(migration).toContain("'uazapi'");
+    // A migration se descreve no PRÓPRIO cabeçalho; o MANIFEST.md é histórico e
+    // não recebe linha nova (`tests/unit/manifest-x-migrations.test.ts`).
+    expect(migration.split("\n")[0]).toMatch(/^-- manifest: /);
+    expect(readFileSync("supabase/migrations/MANIFEST.md", "utf8")).not.toContain("_canal_uazapi`");
+  });
 
-    expect(readFileSync("supabase/migrations/MANIFEST.md", "utf8")).toContain(
-      "`9412_canal_uazapi`",
-    );
+  it("a migration reescreve os CHECKs com a lista INTEIRA — não apaga quem veio antes", () => {
+    const migration = readFileSync(MIGRATION, "utf8");
+    // Um drop+add com a lista antiga, rodando depois da 9342, tiraria o robô do vocabulário.
+    expect(migration).toMatch(/channel_sessions_provider_check[\s\S]{0,400}'telegram'/);
+    expect(migration).toMatch(/provider = 'telegram' and telegram_bot_id is not null/);
+    expect(migration).toMatch(/webhook_events_log_provider_check check \(provider in \([\s\S]*'telegram'/);
+    expect(migration).toMatch(/'stripe', 'asaas'/);
   });
 });

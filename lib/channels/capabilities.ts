@@ -255,9 +255,9 @@ export const CHANNEL_CAPABILITIES: Record<ProviderDeMensagem, ChannelCapabilitie
     groups: "full",
     costPerMessage: false,
     alteraMensagemEnviada: true,
-    // As quatro abaixo nascem `false` e viram `true` junto com o método do
-    // adapter que as cumpre — o teste de matriz cobra os dois sentidos.
-    podeReagir: false,
+    // `sendReaction` (`POST /message/react`). As três seguintes ficam `false` até
+    // o método do adapter que as cumpre existir — o teste de matriz cobra os dois sentidos.
+    podeReagir: true,
     transmissao: false,
     phonebook: false,
     statusUpdates: false,

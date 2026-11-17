@@ -140,14 +140,25 @@ describe("envelope Uazapi", () => {
     ]);
   });
 
-  it("reação não vira mensagem nova — o CRM não a modela", () => {
+  it("reação não vira mensagem nova: vira reação ligada ao alvo (#2797)", () => {
     const raw = JSON.parse(fixture("messages-inbound-text"));
     raw.message.messageType = "ReactionMessage";
     raw.message.reaction = "TEST_MESSAGE_ID";
     raw.message.text = "👍";
-    expect(lerEnvelopeUazapi(JSON.stringify(raw))).toEqual({
+    expect(lerEnvelopeUazapi(JSON.stringify(raw))).toMatchObject({
       ok: true,
-      event: { kind: "ignored", reason: "reacao" },
+      event: { kind: "reaction", reacao: { alvoExternalId: "TEST_MESSAGE_ID", emoji: "👍" } },
+    });
+  });
+
+  it("reação com texto vazio é a REMOÇÃO do gesto", () => {
+    const raw = JSON.parse(fixture("messages-inbound-text"));
+    raw.message.messageType = "ReactionMessage";
+    raw.message.reaction = "TEST_MESSAGE_ID";
+    raw.message.text = "";
+    expect(lerEnvelopeUazapi(JSON.stringify(raw))).toMatchObject({
+      ok: true,
+      event: { kind: "reaction", reacao: { emoji: null } },
     });
   });
 

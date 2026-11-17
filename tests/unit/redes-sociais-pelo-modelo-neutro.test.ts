@@ -148,6 +148,8 @@ describe("CONTROLE: os canais que já existiam continuam declarados", () => {
       // O canal do bot do Telegram (#3440) é provider de MENSAGEM, com matriz
       // de capabilities própria — a matriz continua respondendo por todos.
       "telegram",
+      // A sessão WhatsApp hospedada por instância, opcional da instalação.
+      "uazapi",
     ]);
     for (const provider of PROVIDERS_DE_MENSAGEM) {
       const caps = capabilitiesOf(provider);

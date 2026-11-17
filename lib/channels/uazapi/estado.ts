@@ -16,8 +16,9 @@ export type EstadoDoCanal = "WORKING" | "STOPPED" | "SCAN_QR_CODE" | "STARTING" 
  * webhook recusa como violação de contrato; a leitura de status, que precisa
  * devolver ALGUM estado, assume `FAILED` (o conservador).
  *
- * `conectado` é o booleano `status.connected`/`loggedIn` que `GET /instance/status`
- * devolve ao lado do estado textual, e vale mais que ele.
+ * `conectado` é o `status.loggedIn` que `GET /instance/status` devolve ao lado do
+ * estado textual, e vale mais que ele. Não o `status.connected`: esse fica `true`
+ * com o socket aberto durante o QR, antes de haver número autenticado.
  */
 export function estadoDoCanalUazapi(
   remoto: unknown,

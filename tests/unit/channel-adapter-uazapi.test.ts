@@ -21,6 +21,7 @@ const CREDS = {
   instanceId: "inst-1",
   serverUrl: "https://api.example.test/base",
   token: "token-somente-header",
+  webhookPathToken: "caminho-da-conexao",
 };
 
 function envelope(over: Partial<OutboundEnvelope> = {}): OutboundEnvelope {
@@ -264,5 +265,84 @@ describe("adapter uazapi", () => {
       "disconnect",
       "getStatus",
     ]);
+  });
+
+  it("lista os grupos do número, paginando e sem participantes", async () => {
+    const corpos: unknown[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toBe("https://api.example.test/base/group/list");
+      const corpo = JSON.parse(String(init?.body)) as { offset: number };
+      corpos.push(corpo);
+      return new Response(
+        JSON.stringify(
+          corpo.offset === 0
+            ? { groups: [{ JID: "1@g.us", Name: "Clientes" }, { JID: "lixo" }], hasMore: true, nextOffset: 500 }
+            : { groups: [{ JID: "2@g.us", Name: "" }], hasMore: false },
+        ),
+        { status: 200 },
+      );
+    });
+    await expect(uazapiAdapter.listGroups!({ organizationId: "org-1", sessionRef: "inst-1" })).resolves.toEqual([
+      { chatId: "1@g.us", subject: "Clientes" },
+      { chatId: "2@g.us", subject: "2@g.us" },
+    ]);
+    expect(corpos).toEqual([
+      { noParticipants: true, limit: 500, offset: 0 },
+      { noParticipants: true, limit: 500, offset: 500 },
+    ]);
+    expect(resolveUazapiCreds).toHaveBeenCalledWith(expect.anything(), { organizationId: "org-1", instanceId: "inst-1" });
+  });
+
+  it("liga o recebimento de grupos no webhook DESTA conexão e confirma", async () => {
+    let filtros = ["wasSentByApi", "isGroupYes"];
+    const webhook = () => [{ id: "w1", url: "https://crm.test/api/v1/webhooks/channel/caminho-da-conexao", events: ["messages"], excludeMessages: filtros }];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      if (init?.method === "POST") filtros = (JSON.parse(String(init.body)) as { excludeMessages: string[] }).excludeMessages;
+      return new Response(JSON.stringify(webhook()), { status: 200 });
+    });
+    await expect(
+      uazapiAdapter.setGroupIntake!({ organizationId: "org-1", sessionRef: "inst-1", receive: true }),
+    ).resolves.toBe(true);
+    expect(filtros).toEqual(["wasSentByApi"]);
+  });
+
+  it("sem o token do caminho não há como achar o webhook: não confirma", async () => {
+    vi.mocked(resolveUazapiCreds).mockResolvedValue({ ...CREDS, webhookPathToken: null });
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    await expect(
+      uazapiAdapter.setGroupIntake!({ organizationId: "org-1", sessionRef: "inst-1", receive: true }),
+    ).resolves.toBe(false);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("reage pela mensagem (só id e emoji) e devolve o id curto da reação", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ id: "dono:R1", messageid: "R1" }), { status: 200 }));
+    await expect(
+      uazapiAdapter.sendReaction!({
+        organizationId: "org-1",
+        sessionRef: "inst-1",
+        recipient: "5531999998888@s.whatsapp.net",
+        externalId: "ALVO1",
+        emoji: "👍",
+      }),
+    ).resolves.toEqual({ externalId: "R1" });
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(String(url)).toBe("https://api.example.test/base/message/react");
+    expect(JSON.parse(String(init?.body))).toEqual({ id: "ALVO1", text: "👍" });
+  });
+
+  it("socket aberto durante o QR (`connected` sem `loggedIn`) não é conectado", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ instance: { status: "connecting", qrcode: "data:qr" }, status: { connected: true, loggedIn: false } }),
+        { status: 200 },
+      ),
+    );
+    await expect(uazapiAdapter.sessao!.getStatus({ organizationId: "org-1", sessionRef: "inst-1" })).resolves.toMatchObject({
+      status: "SCAN_QR_CODE",
+      qrCode: "data:qr",
+    });
   });
 });

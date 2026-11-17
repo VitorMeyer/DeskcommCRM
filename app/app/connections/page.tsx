@@ -6,7 +6,7 @@ import { ROLE_RANK } from "@/lib/auth/types";
 import { ConexoesShell } from "@/components/connections/ConexoesShell";
 import { ROTULO_DO_CANAL as ROTULO_DO_ROBO } from "@/lib/channels/bot/connect";
 import { canalGraphParceiroLigado, GRAPH_PARTNER_LABEL } from "@/lib/channels/graph-parceiro/credentials";
-import { canalUazapiLigado, UAZAPI_LABEL } from "@/lib/channels/uazapi/credentials";
+import { UAZAPI_LABEL } from "@/lib/channels/uazapi/credentials";
 import { moduloLigado } from "@/lib/instalacao/modulos";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { traduzir } from "@/lib/i18n/dicionario";
@@ -29,7 +29,11 @@ export default async function ConnectionsPage() {
   );
   const wacallsConfigured = Boolean(process.env.WACALLS_API_BASE_URL);
   // Doc 216 (A): o robô de mensagens é módulo opcional, ligado em /admin/sistema.
-  const roboLigado = await moduloLigado(createAdminClient(), "canal_bot");
+  const [roboLigado, hospedadoLigado] = await Promise.all([
+    moduloLigado(createAdminClient(), "canal_bot"),
+    // PRD 07: o WhatsApp hospedado é módulo opcional, ligado em /admin/sistema.
+    moduloLigado(createAdminClient(), "canal_uazapi"),
+  ]);
 
   return (
     <div className="flex h-full flex-col gap-6 p-6">
@@ -47,7 +51,7 @@ export default async function ConnectionsPage() {
         wacallsConfigured={wacallsConfigured}
         graphParceiro={canalGraphParceiroLigado() ? { label: GRAPH_PARTNER_LABEL } : null}
         bot={roboLigado ? { label: ROTULO_DO_ROBO } : null}
-        canalHospedado={canalUazapiLigado() ? { label: UAZAPI_LABEL } : null}
+        canalHospedado={hospedadoLigado ? { label: UAZAPI_LABEL } : null}
       />
     </div>
   );

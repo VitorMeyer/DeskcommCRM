@@ -14,11 +14,6 @@ import { decryptWebhookSecret } from "@/lib/webhooks/secrets";
 
 import { ARCHIVED_AT, queryTolerantToMissingArchived } from "../archived";
 
-/** Só o literal `true` liga esta integração opcional na instalação. */
-export function canalUazapiLigado(valor: string | undefined = process.env.UAZAPI_ENABLED): boolean {
-  return (valor ?? "").trim().toLowerCase() === "true";
-}
-
 /** Nome de apresentação: componentes e rotas pedem esta constante, não a marca. */
 export const UAZAPI_LABEL = "Uazapi";
 

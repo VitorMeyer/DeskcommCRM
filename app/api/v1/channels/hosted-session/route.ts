@@ -6,7 +6,8 @@ import { fail, ok } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
 import { mfaEmDivida } from "@/lib/auth/server";
 import { requireRole } from "@/lib/auth/require-role";
-import { canalUazapiLigado, UAZAPI_LABEL } from "@/lib/channels/uazapi/credentials";
+import { UAZAPI_LABEL } from "@/lib/channels/uazapi/credentials";
+import { moduloLigado } from "@/lib/instalacao/modulos";
 import { findUazapiSession, salvarUazapiSession } from "@/lib/channels/uazapi/session";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { requireSupportWrite } from "@/lib/impersonate/support";
@@ -25,9 +26,14 @@ function naoExiste(requestId: string): NextResponse {
   return fail("not_found", "not found", 404, { requestId });
 }
 
+/** O módulo `canal_uazapi` desligado = a rota não existe (mesmo 404 do robô). */
+async function moduloDesligado(): Promise<boolean> {
+  return !(await moduloLigado(createAdminClient(), "canal_uazapi"));
+}
+
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const requestId = randomUUID();
-  if (!canalUazapiLigado()) return naoExiste(requestId);
+  if (await moduloDesligado()) return naoExiste(requestId);
   const authz = await requireRole("admin", { requestId, resource: "channel_session" });
   if (!authz.ok) return authz.response;
 
@@ -45,7 +51,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (supportDenied) return supportDenied;
 
   const requestId = randomUUID();
-  if (!canalUazapiLigado()) return naoExiste(requestId);
+  if (await moduloDesligado()) return naoExiste(requestId);
   const authz = await requireRole("admin", { requestId, resource: "channel_session" });
   if (!authz.ok) return authz.response;
   const t = (texto: string) => traduzir(texto, authz.user.idioma);

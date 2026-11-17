@@ -35,16 +35,12 @@ function envelope(over: Partial<OutboundEnvelope> = {}): OutboundEnvelope {
   };
 }
 
-const ORIGINAL = process.env.UAZAPI_ENABLED;
 beforeEach(() => {
-  process.env.UAZAPI_ENABLED = "true";
   vi.mocked(resolveUazapiCreds).mockReset();
   vi.mocked(resolveUazapiCreds).mockResolvedValue(CREDS);
 });
 afterEach(() => {
   vi.restoreAllMocks();
-  if (ORIGINAL === undefined) delete process.env.UAZAPI_ENABLED;
-  else process.env.UAZAPI_ENABLED = ORIGINAL;
 });
 
 describe("adapter uazapi", () => {
@@ -177,11 +173,8 @@ describe("adapter uazapi", () => {
     });
   });
 
-  it("sem credencial ou com a integração desligada não tenta enviar", async () => {
+  it("sem credencial gravada não tenta enviar", async () => {
     vi.mocked(resolveUazapiCreds).mockResolvedValue(null);
-    await expect(uazapiAdapter.send(envelope())).rejects.toThrow(/^uazapi_not_configured/);
-
-    process.env.UAZAPI_ENABLED = "";
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     await expect(uazapiAdapter.send(envelope())).rejects.toThrow(/^uazapi_not_configured/);
     expect(fetchSpy).not.toHaveBeenCalled();

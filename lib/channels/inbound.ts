@@ -35,7 +35,6 @@ import {
 import { criarIngestDeGrupoDb, gravarMensagemDeGrupo } from "@/lib/grupos/ingest";
 
 import { gravarReacaoDeMensagem } from "./reacao";
-import { canalUazapiLigado } from "./uazapi/credentials";
 import { lerEnvelopeUazapi, mensagemDeDesfecho } from "./uazapi/envelope";
 import { canalGraphParceiroLigado } from "./graph-parceiro/credentials";
 import { graphPartnerRefsDaSessao } from "./graph-parceiro/session";
@@ -114,11 +113,13 @@ export function acceptsInboundWebhook(provider: string): boolean {
   // O canal Datafy é opcional da instalação: desligado, a entrada dele não
   // existe — nem para quem tem o token de uma sessão gravada antes.
   if (provider === CHANNEL_PROVIDER_DATAFY) return canalGraphParceiroLigado();
-  if (provider === CHANNEL_PROVIDER_UAZAPI) return canalUazapiLigado();
   return (
     provider === CHANNEL_PROVIDER_ZERNIO ||
     provider === CHANNEL_PROVIDER_SOCIAL ||
-    provider === CHANNEL_PROVIDER_TELEGRAM
+    provider === CHANNEL_PROVIDER_TELEGRAM ||
+    // A entrada só existe para uma conexão já feita (o token do caminho a
+    // resolveu); o módulo `canal_uazapi` decide só se a tela oferece conectar.
+    provider === CHANNEL_PROVIDER_UAZAPI
   );
 }
 

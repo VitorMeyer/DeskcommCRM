@@ -197,6 +197,10 @@ const TEXTO_DO_MODULO: Record<ModuloOpcional, { nome: string; oQueFaz: string }>
     nome: "Robô de mensagens (@BotFather)",
     oQueFaz: "Cada empresa conecta em Conexões um robô criado no @BotFather, e as conversas privadas com ele chegam ao Inbox.",
   },
+  canal_uazapi: {
+    nome: "WhatsApp hospedado (uazapi)",
+    oQueFaz: "Cada empresa conecta em Conexões um número de WhatsApp por uma instância já criada no painel da uazapi, sem contêiner do WhatsApp neste servidor.",
+  },
   campanha_por_email: {
     nome: "Campanha por e-mail (em construção)",
     oQueFaz: "A base da campanha por e-mail: assunto, corpo e público. Ainda não pode ser ligada, porque falta o envio com descadastro.",

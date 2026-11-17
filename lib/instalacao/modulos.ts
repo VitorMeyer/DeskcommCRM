@@ -41,7 +41,7 @@ import type pg from "pg";
 import { logger } from "@/lib/logger";
 
 /**
- * `banco_externo`, `fluxos_atendimento`, `propostas`, `crm_b2b`, `cobranca`, `login_codex`, `setores`, `avisos`, `conferir_whatsapp`, `mcp_por_agente`, `cold_call`, `status_whatsapp`, `painel_atendimento`, `reservas_de_lugar`, `link_de_pagamento`, `canal_bot`, `campanha_por_email`, `revisao_por_km`, `agencias` e `catalogo_por_feed` ligam/desligam por uma linha em `platform_config`
+ * `banco_externo`, `fluxos_atendimento`, `propostas`, `crm_b2b`, `cobranca`, `login_codex`, `setores`, `avisos`, `conferir_whatsapp`, `mcp_por_agente`, `cold_call`, `status_whatsapp`, `painel_atendimento`, `reservas_de_lugar`, `link_de_pagamento`, `canal_bot`, `canal_uazapi`, `campanha_por_email`, `revisao_por_km`, `agencias` e `catalogo_por_feed` ligam/desligam por uma linha em `platform_config`
  * (ver o resto deste arquivo). `honorarios`, `financeiro`, `lista_de_espera`, `ouvidoria`, `cadencias` e `amigo` são MÓDULOS DE TABELA (ADR-0002): a fonte da
  * verdade é `modulos_instalados`, escrita só por `fn_modulo_instalar` (`lib/modulos/service.ts`),
  * nunca por esta tela. Os dois mecanismos convivem na mesma lista porque é isso que
@@ -80,6 +80,7 @@ export const MODULOS_OPCIONAIS = [
   "reservas_de_lugar",
   "link_de_pagamento",
   "canal_bot",
+  "canal_uazapi",
   "campanha_por_email",
   "revisao_por_km",
   "agencias",
@@ -116,6 +117,7 @@ export const MODULOS_OPCIONAIS_POR_FLAG = [
   "reservas_de_lugar",
   "link_de_pagamento",
   "canal_bot",
+  "canal_uazapi",
   "campanha_por_email",
   "revisao_por_km",
   "agencias",
@@ -193,6 +195,13 @@ export const CHAVE_DO_MODULO: Record<(typeof MODULOS_OPCIONAIS_POR_FLAG)[number]
   // fornecedor a mais. Desligado, a aba de Conexões some e conectar responde
   // 404; um robô já conectado segue atendendo até a empresa desconectá-lo.
   canal_bot: "MODULO_CANAL_BOT",
+  // PRD 07: o WhatsApp por instância hospedada num serviço de terceiro, ao lado
+  // do canal por QR. Serve a quem não quer o contêiner do WhatsApp no servidor,
+  // não à maioria, e manda a credencial da empresa a um fornecedor a mais.
+  // Desligado, a aba de Conexões some e conectar responde 404; uma conexão já
+  // feita segue atendendo até a empresa removê-la — o mesmo do robô acima.
+  // Antes era `UAZAPI_ENABLED` no `.env`; a decisão do dono é que a chave mora na tela.
+  canal_uazapi: "MODULO_CANAL_UAZAPI",
   // Doc 305 (A): a campanha por e-mail do #4289 chegou em partes. Esta guarda o
   // assunto, o corpo e o público; o envio, o descadastro em um clique e a lista
   // de quem pediu para não receber ainda não existem, e por isso o módulo está em

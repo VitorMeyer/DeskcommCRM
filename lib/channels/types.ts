@@ -32,7 +32,7 @@ export type ChannelProvider =
    */
   | "telegram"
   /**
-   * Sessão WhatsApp hospedada por instância (opcional, `UAZAPI_ENABLED`). A
+   * Sessão WhatsApp hospedada por instância (módulo `canal_uazapi`). A
    * instância é do cliente, criada no painel do serviço; a conexão guarda URL
    * e token cifrados. Ver `./adapters/uazapi.ts`.
    */

@@ -17,7 +17,6 @@ import {
 import { CHANNEL_PROVIDER_UAZAPI } from "../capabilities";
 import { CredencialRecusadaError } from "../credencial-recusada";
 import {
-  canalUazapiLigado,
   resolveUazapiCreds,
   validarUazapiServerUrl,
   type UazapiCredentials,
@@ -117,12 +116,12 @@ export function resolveUazapiRecipient(input: RecipientInput): string | null {
   return digits ? `${digits}@s.whatsapp.net` : null;
 }
 
+/**
+ * A credencial gravada da sessão. O módulo da instalação (`canal_uazapi`) não é
+ * conferido aqui, de propósito: ele decide se a tela OFERECE conectar; uma
+ * conexão já feita segue atendendo até a empresa removê-la, como o robô.
+ */
 async function credenciaisDaSessao(input: ChannelTenantScope & { sessionRef: string }) {
-  if (!canalUazapiLigado()) {
-    throw new Error(
-      `${NAO_CONFIGURADO}: o canal está desligado nesta instalação (UAZAPI_ENABLED).`,
-    );
-  }
   const creds = await resolveUazapiCreds(createAdminClient(), {
     organizationId: input.organizationId,
     instanceId: input.sessionRef,
@@ -218,7 +217,7 @@ export const uazapiAdapter: ChannelAdapter = {
 
   isConfigured(): boolean {
     // A presença da credencial é assíncrona e por sessão; `send` a confirma.
-    return canalUazapiLigado();
+    return true;
   },
 
   codes: {
@@ -334,8 +333,6 @@ export const uazapiAdapter: ChannelAdapter = {
   },
 
   async checkHealth(input): Promise<ChannelHealth> {
-    if (!canalUazapiLigado())
-      return { reachable: false, status: null, detail: "canal_desligado_na_instalacao" };
     const storedCreds = await resolveUazapiCreds(createAdminClient(), {
       organizationId: input.organizationId,
       instanceId: input.sessionRef,

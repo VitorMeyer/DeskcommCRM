@@ -304,10 +304,6 @@ const schema = z.object({
   // em `lib/channels/zernio/credentials.ts`, pelo resolvedor da instalação, a
   // cada chamada — nunca por `env.`, para a troca na tela valer na hora.
   ZERNIO_PLATFORM_API_KEY: z.string().optional().default(""),
-  // ─── Canal hospedado por instância — OPCIONAL, DESLIGADO POR PADRÃO ───
-  // Cada organização cola URL e token na própria conexão cifrada. O ambiente
-  // só autoriza que a instalação ofereça essa opção, nunca carrega credencial.
-  UAZAPI_ENABLED: z.string().optional().default(""),
 
   // Upstash Redis
   UPSTASH_REDIS_REST_URL: required("UPSTASH_REDIS_REST_URL"),

@@ -401,6 +401,15 @@ export const MODULOS_NA_TELA: ReadonlyArray<{
     painelEm: "/app/connections",
   },
   {
+    modulo: "canal_uazapi",
+    id: "modulo-canal-uazapi",
+    rotulo: "WhatsApp hospedado (uazapi)",
+    descricao:
+      "Ligado, cada empresa ganha em Conexões uma aba para conectar um número de WhatsApp por uma instância criada no painel da uazapi, colando a URL do servidor e o token dela, e lê o QR Code pela tela. O número atende como o conectado por QR, com o mesmo ritmo de envio contra bloqueio; o serviço é contratado pela empresa, e a conversa passa por ele. Desligado, a aba some e ninguém conecta um número novo; uma conexão já feita segue atendendo, e para removê-la basta ligar o módulo de novo.",
+    foraDoMenu: "Não cria porta no menu do CRM: ele libera uma aba em",
+    painelEm: "/app/connections",
+  },
+  {
     modulo: "campanha_por_email",
     id: "modulo-campanha-por-email",
     rotulo: "Campanha por e-mail (em construção)",

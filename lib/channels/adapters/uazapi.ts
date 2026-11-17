@@ -21,7 +21,7 @@ import {
   validarUazapiServerUrl,
   type UazapiCredentials,
 } from "../uazapi/credentials";
-import { estadoDoCanalUazapi } from "../uazapi/estado";
+import { estadoDoCanalUazapi, numeroDaInstancia } from "../uazapi/estado";
 import { requisitarNo, requisitarUazapi as requisitarHttp } from "../uazapi/http";
 import { parseRetryAfterMs } from "../uazapi/retry-after";
 import { caminhoDaConexao, definirRecebimentoDeGrupos } from "../uazapi/webhook-remoto";
@@ -63,7 +63,8 @@ type UazapiBody = {
   status?: {
     connected?: boolean;
     loggedIn?: boolean;
-    jid?: { user?: string } | null;
+    /** Texto `"<número>:<aparelho>@s.whatsapp.net"` na API real; objeto na especificação. */
+    jid?: unknown;
   };
   qrcode?: string | null;
   qrCode?: string | null;
@@ -92,12 +93,11 @@ function statusDaSessao(body: UazapiBody): ChannelSessionStatus {
   // (`connected`) sem número autenticado — tratar isso como conectado mostraria
   // "WORKING" na tela antes de alguém ler o código.
   const status = estadoDoCanalUazapi(body.instance?.status, body.status?.loggedIn === true) ?? "FAILED";
-  const jid = body.status?.jid?.user?.replace(/\D/g, "") || null;
   return {
     status,
     qrCode: body.instance?.qrcode ?? body.qrcode ?? body.qrCode ?? null,
     pairingCode: body.instance?.paircode ?? body.pairingCode ?? body.paircode ?? null,
-    phoneNumber: jid,
+    phoneNumber: numeroDaInstancia(body),
     displayName: body.instance?.profileName ?? null,
   };
 }

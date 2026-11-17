@@ -1,5 +1,5 @@
 import { validarUazapiServerUrl } from "./credentials";
-import { estadoDoCanalUazapi } from "./estado";
+import { estadoDoCanalUazapi, numeroDaInstancia } from "./estado";
 
 export type ValidacaoUazapi =
   | {
@@ -58,7 +58,7 @@ export async function validarCredenciaisUazapi(input: {
 
   const body = (await response.json().catch(() => null)) as {
     instance?: { id?: unknown; status?: unknown; profileName?: unknown };
-    status?: { connected?: unknown; loggedIn?: unknown; jid?: { user?: unknown } | null };
+    status?: { connected?: unknown; loggedIn?: unknown; jid?: unknown };
   } | null;
   const instanceId = texto(body?.instance?.id);
   if (!instanceId) return { ok: false, motivo: "O token não identificou uma instância válida." };
@@ -72,7 +72,8 @@ export async function validarCredenciaisUazapi(input: {
     serverUrl,
     instanceId,
     status,
-    phoneNumber: texto(body?.status?.jid?.user)?.replace(/\D/g, "") ?? null,
+    // Só com o número conectado: antes de parear não há aparelho a nomear.
+    phoneNumber: status === "WORKING" ? numeroDaInstancia(body) : null,
     displayName: texto(body?.instance?.profileName),
   };
 }

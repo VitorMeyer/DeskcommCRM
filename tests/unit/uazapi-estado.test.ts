@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { estadoDoCanalUazapi } from "@/lib/channels/uazapi/estado";
+import { readFileSync } from "node:fs";
+
+import { estadoDoCanalUazapi, numeroDaInstancia } from "@/lib/channels/uazapi/estado";
 
 /**
  * Uma tabela só para o estado remoto. O webhook de conexão, a leitura de status
@@ -39,3 +41,34 @@ describe("estadoDoCanalUazapi", () => {
     expect(estadoDoCanalUazapi("disconnected")).not.toBe("FAILED");
   });
 });
+
+describe("numeroDaInstancia", () => {
+  const real = () =>
+    JSON.parse(readFileSync("tests/fixtures/uazapi/instance-status-connected.json", "utf8")) as {
+      instance: Record<string, unknown>;
+      status: Record<string, unknown>;
+    };
+
+  it("lê o `jid` em TEXTO com o sufixo do aparelho — a forma que o servidor real devolve", () => {
+    const corpo = real();
+    delete corpo.instance.owner;
+    expect(numeroDaInstancia(corpo)).toBe("5511900000001");
+  });
+
+  it("lê o objeto `{ user }` que a especificação documenta", () => {
+    expect(numeroDaInstancia({ status: { jid: { user: "5511900000001", device: 0 } } })).toBe("5511900000001");
+  });
+
+  it("cai para `instance.owner` quando o `jid` não vem", () => {
+    const corpo = real();
+    corpo.status.jid = null;
+    expect(numeroDaInstancia(corpo)).toBe("5511900000001");
+  });
+
+  it("antes de parear não há número: nada de lixo nem de string vazia", () => {
+    expect(numeroDaInstancia({ instance: { owner: "" }, status: { jid: null } })).toBeNull();
+    expect(numeroDaInstancia({ status: { jid: "0@s.whatsapp.net" } })).toBeNull();
+    expect(numeroDaInstancia(null)).toBeNull();
+  });
+});
+

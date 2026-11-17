@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type * as Credenciais from "@/lib/channels/uazapi/credentials";
@@ -338,4 +340,16 @@ describe("adapter uazapi", () => {
       qrCode: "data:qr",
     });
   });
+
+  it("conectado, a leitura de estado devolve o número pela resposta REAL (`jid` em texto)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(readFileSync("tests/fixtures/uazapi/instance-status-connected.json", "utf8"), { status: 200 }),
+    );
+    await expect(uazapiAdapter.sessao!.getStatus({ organizationId: "org-1", sessionRef: "inst-1" })).resolves.toMatchObject({
+      status: "WORKING",
+      phoneNumber: "5511900000001",
+      displayName: "Contato de teste",
+    });
+  });
 });
+

@@ -1,0 +1,25 @@
+{
+  "instance": {
+    "id": "r0000000000000",
+    "status": "connected",
+    "name": "instancia-de-teste",
+    "profileName": "Contato de teste",
+    "profilePicUrl": "https://exemplo.invalid/foto",
+    "isBusiness": false,
+    "plataform": "android",
+    "systemName": "servidor-de-teste",
+    "owner": "5511900000001",
+    "current_presence": "unavailable",
+    "lastDisconnect": "",
+    "lastDisconnectReason": "",
+    "created": "2026-11-17 20:11:59.560Z",
+    "updated": "2026-11-17 20:11:59.560Z",
+    "currentTime": "2026-11-17 20:25:23.828Z"
+  },
+  "status": {
+    "connected": true,
+    "jid": "5511900000001:72@s.whatsapp.net",
+    "loggedIn": true,
+    "resetting": false
+  }
+}

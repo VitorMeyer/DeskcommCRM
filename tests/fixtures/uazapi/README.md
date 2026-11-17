@@ -16,3 +16,8 @@ e `groups-*` vêm do repositório público de exemplos de webhook citado no PRD 
 identificadores opacos (`@lid`), nomes, ids de grupo, token, `BaseUrl`, URLs de mídia,
 miniaturas e hashes de mídia foram trocados por valores de teste antes de entrar aqui.
 Os ids de mensagem (`AC…`) foram mantidos: são o que liga a edição e a reação à original.
+
+`instance-status-connected.json` e `connection-connected.json` têm a FORMA lida da
+instância de teste do dono (2026-11-17), com número, nome, ids e URLs trocados.
+A resposta real de `GET /instance/status` traz `status.jid` como texto
+(`"<número>:<aparelho>@s.whatsapp.net"`), não o objeto `{ user }` da especificação v2.6.9.

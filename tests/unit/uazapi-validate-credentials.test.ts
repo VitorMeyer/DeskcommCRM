@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/automation/outbound-ip", () => ({
@@ -34,4 +36,26 @@ describe("validarCredenciaisUazapi", () => {
     ).resolves.toEqual({ ok: false, motivo: "Informe o token da instância." });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  it("instância já conectada: grava o número pela resposta REAL (`jid` em texto)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(readFileSync("tests/fixtures/uazapi/instance-status-connected.json", "utf8"), { status: 200 }),
+    );
+    await expect(
+      validarCredenciaisUazapi({ serverUrl: "https://uazapi.example.test", token: "t" }),
+    ).resolves.toMatchObject({ ok: true, status: "WORKING", phoneNumber: "5511900000001" });
+  });
+
+  it("instância ainda não pareada: o `owner` antigo não vira número da conexão", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ instance: { id: "i", status: "disconnected", owner: "5511900000001" }, status: { jid: null } }),
+        { status: 200 },
+      ),
+    );
+    await expect(
+      validarCredenciaisUazapi({ serverUrl: "https://uazapi.example.test", token: "t" }),
+    ).resolves.toMatchObject({ ok: true, status: "STOPPED", phoneNumber: null });
+  });
 });
+

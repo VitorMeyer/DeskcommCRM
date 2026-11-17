@@ -1,0 +1,8 @@
+{
+  "country": "br",
+  "cities": [
+    { "value": "abaete", "label": "Abaeté", "state": "mg", "state_label": "Minas Gerais", "country_value": "br", "country_label": "Brazil", "raw_city": "abaete" },
+    { "value": "belohorizonte", "label": "Belo Horizonte", "state": "mg", "state_label": "Minas Gerais", "country_value": "br", "country_label": "Brazil", "raw_city": "belohorizonte" },
+    { "value": "abadiadegoias", "label": "Abadia de Goiás", "state": "go", "state_label": "Goiás", "country_value": "br", "country_label": "Brazil", "raw_city": "abadiadegoias" }
+  ]
+}

@@ -29,6 +29,8 @@ import type {
   ChannelAdapter,
   ChannelGroup,
   ChannelHealth,
+  CidadeDaRegiao,
+  RegiaoDaConexao,
   ChannelSessionStatus,
   ChannelTenantScope,
   OutboundEnvelope,
@@ -86,6 +88,33 @@ async function requisitarUazapi(
   const { response, body } = await requisitarHttp(creds, path, init);
   const corpo = body && typeof body === "object" && !Array.isArray(body) ? body : {};
   return { response, body: corpo as UazapiBody };
+}
+
+/**
+ * `GET /instance/proxy` na forma neutra. `effective_mode` diz como a conexão SAI
+ * agora; `mode` é só a preferência salva — numa contingência os dois divergem, e
+ * a tela tem de mostrar a verdade, não o pedido.
+ */
+function regiaoDaResposta(body: unknown): RegiaoDaConexao {
+  const d = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const texto = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  const fallback = d.fallback && typeof d.fallback === "object" ? (d.fallback as Record<string, unknown>) : {};
+  const efetivo = texto(d.effective_mode);
+  const emUso: RegiaoDaConexao["emUso"] =
+    fallback.active === true
+      ? "contingencia"
+      : efetivo === "custom"
+        ? "propria"
+        : efetivo === "direct"
+          ? "direta"
+          : "regional";
+  return {
+    pais: texto(d.proxy_managed_country) ?? "br",
+    estado: texto(d.proxy_managed_state),
+    cidade: texto(d.proxy_managed_city),
+    emUso,
+    erro: texto(d.last_test_error),
+  };
 }
 
 function statusDaSessao(body: UazapiBody): ChannelSessionStatus {
@@ -285,6 +314,65 @@ export const uazapiAdapter: ChannelAdapter = {
         { method: "POST", body: "{}" },
         { credencialComNome: true },
       );
+    },
+
+    regiao: {
+      async cidades(input): Promise<CidadeDaRegiao[]> {
+        const creds = await credenciaisDaSessao(input);
+        const q = new URLSearchParams({ country: input.pais });
+        if (input.estado) q.set("state", input.estado);
+        // Catálogo público do servidor (não usa o token, mas a porta HTTP é a
+        // mesma: URL já validada contra SSRF, sem seguir redirect).
+        const { response, body } = await requisitarHttp(creds, `/proxy-managed/cities?${q.toString()}`);
+        if (!response.ok) throw new Error(`uazapi_regiao_catalogo_${response.status}`);
+        const lista = (body as { cities?: unknown }).cities;
+        if (!Array.isArray(lista)) return [];
+        return lista.flatMap((bruto): CidadeDaRegiao[] => {
+          const c = bruto as Record<string, unknown>;
+          return typeof c.value === "string" && typeof c.label === "string" && typeof c.state === "string"
+            ? [
+                {
+                  valor: c.value,
+                  nome: c.label,
+                  estado: c.state,
+                  estadoNome: typeof c.state_label === "string" ? c.state_label : c.state.toUpperCase(),
+                },
+              ]
+            : [];
+        });
+      },
+
+      async atual(input): Promise<RegiaoDaConexao> {
+        const creds = await credenciaisDaSessao(input);
+        const { response, body } = await requisitarHttp(creds, "/instance/proxy");
+        if (credencialFoiRecusada(response)) throw new CredencialRecusadaError(`http_${response.status}`);
+        if (!response.ok) throw new Error(`uazapi_regiao_${response.status}`);
+        return regiaoDaResposta(body);
+      },
+
+      async definir(input): Promise<RegiaoDaConexao> {
+        const creds = await credenciaisDaSessao(input);
+        // `internal` = a infraestrutura de proxy do próprio serviço, com o alvo
+        // geográfico pedido. O 200 confirma que a preferência foi salva; a rota
+        // real é validada no próximo ciclo da conexão — por isso relemos.
+        await exigirSucesso(
+          creds,
+          "/instance/proxy",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              mode: "internal",
+              proxy_managed_country: input.pais,
+              proxy_managed_state: input.estado,
+              proxy_managed_city: input.cidade,
+            }),
+          },
+          { credencialComNome: true },
+        );
+        const { response, body } = await requisitarHttp(creds, "/instance/proxy");
+        if (!response.ok) throw new Error(`uazapi_regiao_${response.status}`);
+        return regiaoDaResposta(body);
+      },
     },
   },
 

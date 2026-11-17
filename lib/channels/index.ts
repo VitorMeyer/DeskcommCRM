@@ -62,8 +62,11 @@ export type { ChannelSessionRef } from "./session-ref";
 export type {
   ChannelAdapter,
   ChannelCapabilities,
+  ChannelRegiaoOps,
   ChannelSessionOps,
   ChannelSessionStatus,
+  CidadeDaRegiao,
+  RegiaoDaConexao,
   ChannelProvider,
   ContatoDoAparelho,
   ProviderDeMensagem,

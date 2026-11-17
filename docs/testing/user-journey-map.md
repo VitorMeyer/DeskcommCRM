@@ -4398,11 +4398,11 @@ celular faz o papel do cliente; (d) um grupo de teste com o número da empresa e
 | J69.10 `[P1]` | O cliente manda foto, áudio e documento | os três aparecem e abrem; o áudio toca || PASS com conserto (2026-11-17): foto, áudio e documento copiados com o tamanho exato; o documento ficava **sem nome** (`552efd20b`). Descrição/transcrição por IA pendentes por falta de chave de IA (esperado) |
 | J69.11 `[P1]` | O atendente manda foto, documento, áudio gravado, contato e localização | os cinco chegam no celular do cliente | |
 | J69.12 `[P1]` | O cliente **edita** uma mensagem | a conversa mostra o texto novo na mesma bolha; nenhuma bolha duplicada || PASS (2026-11-17): mesma linha, `edited_at` carimbado |
-| J69.13 `[P1]` | O cliente **reage** com 👍 a uma mensagem nossa | a reação aparece sobre a mensagem; tirar a reação a remove || PASS parcial (2026-11-17): a reação entrou ligada ao alvo; a remoção ainda não foi exercida |
+| J69.13 `[P1]` | O cliente **reage** com 👍 a uma mensagem nossa | a reação aparece sobre a mensagem; tirar a reação a remove || PASS (2026-11-17): a reação entrou ligada ao alvo, e tirá-la a removeu |
 | J69.14 `[P1]` | O atendente reage pelo Inbox | a reação chega no celular do cliente | |
 | J69.15 `[P1]` | O cliente **apaga para todos** | a mensagem fica no histórico, marcada como apagada || PASS (2026-11-17): `revoked_at` carimbado, a linha permanece |
-| J69.16 `[P0]` | Alguém escreve no grupo de teste, **sem** o grupo ligado | nada aparece no Inbox; nenhum contato novo; a IA não responde | |
-| J69.17 `[P1]` | Conexões › Grupos lista os grupos do número; ligar o grupo de teste | mensagens do grupo entram numa conversa do GRUPO, com o nome de quem escreveu em cada bolha; a IA não responde | |
+| J69.16 `[P0]` | Alguém escreve no grupo de teste, **sem** o grupo ligado | nada aparece no Inbox; nenhum contato novo; a IA não responde | PASS (2026-11-17): mensagem de outro grupo do número, não ligado, não criou conversa nem contato |
+| J69.17 `[P1]` | Conexões › Grupos lista os grupos do número; ligar o grupo de teste | mensagens do grupo entram numa conversa do GRUPO, com o nome de quem escreveu em cada bolha; a IA não responde | PASS (2026-11-17): o grupo apareceu na lista pela API real, ligou (auditado), o filtro do webhook NA INSTÂNCIA trocou para receber grupos, e a mensagem entrou na conversa do grupo com o autor em `group_sender`; nenhum despacho de IA |
 | J69.18 `[P2]` | Ligar "IA responde" naquele grupo | a IA passa a responder no grupo | |
 | J69.19 `[P1]` | Desligar o último grupo ligado | mensagens de grupo param de chegar | |
 | J69.20 `[P0]` | Agente de IA publicado, com acesso a este número | responde o cliente por este canal, com "digitando…" antes; caso que atravessa o agente mede o PAR (a tela + a ferramenta chamada direto, com o mesmo texto) | |
@@ -4410,6 +4410,7 @@ celular faz o papel do cliente; (d) um grupo de teste com o número da empresa e
 | J69.22 `[P1]` | Trocar o token por o de OUTRA instância, com o número desconectado | a conexão continua sendo a mesma linha (histórico e acesso da IA preservados) | |
 | J69.23 `[P1]` | Remover a conexão | a aba volta ao formulário vazio; a instância continua no painel da uazapi; as conversas ficam no histórico | |
 | J69.24 `[P2]` | Desligar o módulo com a conexão ativa | a aba some; mensagens do cliente continuam chegando | |
+| J69.25 `[P1]` | Escolher estado e cidade em "Região do número" e aplicar | a região salva aparece como "Em uso"; a conexão segue conectada e passa a sair pela cidade no próximo ciclo; cidade fora do catálogo é recusada | |
 
 Casos do dono do produto (a preencher): cada um com quem manda o quê, por onde, e o que deveria
 acontecer na tela — vira linha `J69.25+` nesta tabela e, quando der, teste automatizado com o

@@ -259,6 +259,8 @@ describe("adapter uazapi", () => {
       "connect",
       "disconnect",
       "getStatus",
+      // A região de saída (proxy regional) — configura a instância, não a apaga.
+      "regiao",
     ]);
   });
 
@@ -349,6 +351,69 @@ describe("adapter uazapi", () => {
       status: "WORKING",
       phoneNumber: "5511900000001",
       displayName: "Contato de teste",
+    });
+  });
+
+  describe("região de saída (proxy regional)", () => {
+    const escopo = { organizationId: "org-1", sessionRef: "inst-1" };
+
+    it("lê a região atual pela resposta REAL: país sem cidade fixa, pela rota regional", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(readFileSync("tests/fixtures/uazapi/instance-proxy.json", "utf8"), { status: 200 }),
+      );
+      await expect(uazapiAdapter.sessao!.regiao!.atual(escopo)).resolves.toEqual({
+        pais: "br",
+        estado: null,
+        cidade: null,
+        emUso: "regional",
+        erro: null,
+      });
+    });
+
+    it("contingência ativa aparece como contingência, não como a região pedida", async () => {
+      const corpo = JSON.parse(readFileSync("tests/fixtures/uazapi/instance-proxy.json", "utf8"));
+      corpo.fallback.active = true;
+      corpo.proxy_managed_state = "mg";
+      corpo.proxy_managed_city = "belohorizonte";
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(corpo), { status: 200 }));
+      await expect(uazapiAdapter.sessao!.regiao!.atual(escopo)).resolves.toMatchObject({
+        emUso: "contingencia",
+        cidade: "belohorizonte",
+      });
+    });
+
+    it("o catálogo vira a forma neutra, pela URL validada e com o estado na query", async () => {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(
+          new Response(readFileSync("tests/fixtures/uazapi/proxy-managed-cities-mg.json", "utf8"), { status: 200 }),
+        );
+      const cidades = await uazapiAdapter.sessao!.regiao!.cidades({ ...escopo, pais: "br", estado: "mg" });
+      expect(String(fetchSpy.mock.calls[0]![0])).toBe(
+        "https://api.example.test/base/proxy-managed/cities?country=br&state=mg",
+      );
+      expect(fetchSpy.mock.calls[0]![1]?.redirect).toBe("error");
+      expect(cidades[1]).toEqual({ valor: "belohorizonte", nome: "Belo Horizonte", estado: "mg", estadoNome: "Minas Gerais" });
+    });
+
+    it("definir pede o proxy INTERNO com o alvo geográfico e relê o que ficou valendo", async () => {
+      const salvo = { ...JSON.parse(readFileSync("tests/fixtures/uazapi/instance-proxy.json", "utf8")), proxy_managed_state: "mg", proxy_managed_city: "belohorizonte" };
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify(salvo), { status: 200 }));
+      await expect(
+        uazapiAdapter.sessao!.regiao!.definir({ ...escopo, pais: "br", estado: "mg", cidade: "belohorizonte" }),
+      ).resolves.toMatchObject({ estado: "mg", cidade: "belohorizonte", emUso: "regional" });
+      const [url, init] = fetchSpy.mock.calls[0]!;
+      expect(String(url)).toBe("https://api.example.test/base/instance/proxy");
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        mode: "internal",
+        proxy_managed_country: "br",
+        proxy_managed_state: "mg",
+        proxy_managed_city: "belohorizonte",
+      });
     });
   });
 });

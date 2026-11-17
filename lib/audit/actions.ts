@@ -374,6 +374,8 @@ export const AUDIT_ACTIONS = [
   "channel.historico_import_failed",
   "channel.historico_analysis_started",
   "channel.reconnected",
+  // PRD 07: a região de saída (proxy regional) da conexão hospedada mudou.
+  "channel.region_updated",
   "channel.disconnected",
   // Duas ações distintas de propósito: `deleted` apagou a linha (canal virgem),
   // `archived` só a escondeu porque conversas/mensagens ainda a referenciam.

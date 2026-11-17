@@ -1,0 +1,15 @@
+{
+  "effective_detail": "managed_pool",
+  "effective_mode": "internal",
+  "fallback": { "active": false, "reason": "", "since": 0 },
+  "last_test_at": 1794946425734,
+  "last_test_error": "",
+  "managed": true,
+  "mode": "internal",
+  "proxy_fallback": "internal",
+  "proxy_managed_city": "",
+  "proxy_managed_country": "br",
+  "proxy_managed_state": "",
+  "proxy_url": "managed_pool://hidden",
+  "validation_error": false
+}

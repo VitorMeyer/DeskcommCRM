@@ -783,6 +783,48 @@ export interface ChannelSessionOps {
   ): Promise<ChannelSessionStatus>;
   getStatus(input: ChannelTenantScope & { sessionRef: string }): Promise<ChannelSessionStatus>;
   disconnect(input: ChannelTenantScope & { sessionRef: string }): Promise<void>;
+  /**
+   * Região de saída da conexão — o proxy regional que o transporte hospedado
+   * oferece (o número "aparece" no WhatsApp a partir da cidade escolhida).
+   * Ausente = o canal não escolhe região, e a tela não oferece o bloco.
+   */
+  regiao?: ChannelRegiaoOps;
+}
+
+/** Uma cidade do catálogo de regiões do transporte, na forma neutra. */
+export interface CidadeDaRegiao {
+  /** O identificador que o transporte aceita (slug). */
+  valor: string;
+  nome: string;
+  /** Sigla da subdivisão, minúscula (`mg`). */
+  estado: string;
+  estadoNome: string;
+}
+
+/** A região em que a conexão está configurada — e como ela sai AGORA. */
+export interface RegiaoDaConexao {
+  /** ISO alpha-2 minúsculo. */
+  pais: string;
+  estado: string | null;
+  cidade: string | null;
+  /**
+   * `regional` = pela região pedida (ou pelo país, sem cidade fixa);
+   * `contingencia` = a rota principal caiu e o transporte usa outra;
+   * `propria` = proxy do próprio cliente; `direta` = sem proxy.
+   */
+  emUso: "regional" | "contingencia" | "propria" | "direta";
+  /** Última falha conhecida da rota, quando houver. */
+  erro: string | null;
+}
+
+export interface ChannelRegiaoOps {
+  cidades(
+    input: ChannelTenantScope & { sessionRef: string; pais: string; estado?: string | null },
+  ): Promise<CidadeDaRegiao[]>;
+  atual(input: ChannelTenantScope & { sessionRef: string }): Promise<RegiaoDaConexao>;
+  definir(
+    input: ChannelTenantScope & { sessionRef: string; pais: string; estado: string; cidade: string },
+  ): Promise<RegiaoDaConexao>;
 }
 
 /** Definição aprovada, na forma NEUTRA — sem o vocabulário de nenhum provider. */

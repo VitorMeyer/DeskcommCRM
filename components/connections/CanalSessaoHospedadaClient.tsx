@@ -16,6 +16,7 @@ import { useT } from "@/hooks/i18n/useT";
 import { ChannelAiAccess } from "./ChannelAiAccess";
 import { ExcluirCanalDialog } from "./ConnectionsClient";
 import { PairingOptions } from "./PairingOptions";
+import { RegiaoDoNumero } from "./RegiaoDoNumero";
 
 interface Sessao {
   id: string;
@@ -201,6 +202,8 @@ export function CanalSessaoHospedadaClient({ label }: { label: string }) {
         )}
 
         {session && <ChannelAiAccess channelId={session.id} />}
+
+        {session?.hasToken && !credencialRecusada && <RegiaoDoNumero sessionId={session.id} />}
 
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="hosted-server-url">{t("URL do servidor")}</Label>

@@ -16,8 +16,19 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { ApiError } from "@/lib/api/types";
 import { logger } from "@/lib/logger";
 
-/** No que a captação deu. Espelha o CHECK de `webhook_lead_captures.outcome`. */
-export type DesfechoDaCaptacao = "criado" | "duplicado" | "recusado";
+/**
+ * No que a captação deu.
+ *
+ * Os QUATRO valores são o vocabulário do CHECK de
+ * `webhook_lead_captures.outcome` (migration 0683, que alargou o da 0174), e a
+ * tela "Leads recebidos" (`lib/schemas/lead-captures.ts`) espelha a mesma
+ * lista: as três listas — coluna, aqui e lá — não podem divergir, e é a
+ * `desfecho-da-captacao-um-vocabulario-so` que cobra isso.
+ *
+ * `atualizado` é o desfecho do card que a integração REESCREVEU (#2316), e ele
+ * só existe com a opção `update_existing_lead_on_capture` ligada na fonte.
+ */
+export type DesfechoDaCaptacao = "criado" | "duplicado" | "recusado" | "atualizado";
 
 /**
  * Por que uma captação foi recusada. Vocabulário só do TypeScript — a coluna
@@ -34,7 +45,13 @@ export type MotivoDaRecusa =
   | "recusa_da_regra"
   /** Recusa que não é nem do funil nem da etapa da fonte — o rótulo não mente. */
   | "erro_inesperado"
-  | "campo_numerico_invalido";
+  | "campo_numerico_invalido"
+  /** Formulário da Meta (#3768): o aviso veio sem as respostas e a busca está desligada. */
+  | "lead_ads_sem_respostas"
+  /** Formulário da Meta: a busca das respostas falhou (token, permissão, tempo). */
+  | "lead_ads_busca_falhou"
+  /** Formulário da Meta: a fonte dona da página está pausada. */
+  | "lead_ads_fonte_pausada";
 
 /** O que a tela mostra para cada motivo, em português de gente. */
 export const MOTIVO_DA_RECUSA_LABEL: Record<MotivoDaRecusa, string> = {
@@ -52,6 +69,12 @@ export const MOTIVO_DA_RECUSA_LABEL: Record<MotivoDaRecusa, string> = {
     "Os dados chegaram, mas a criação do negócio falhou por outro motivo — não é nem o funil nem a etapa da fonte.",
   campo_numerico_invalido:
     "Uma resposta numérica não estava no formato aceito pelo formulário. Confira se o campo contém apenas números e use o formato BRL na pergunta de moeda.",
+  lead_ads_sem_respostas:
+    "O aviso da Meta chegou sem as respostas do formulário, e a busca das respostas está desligada nesta fonte. Cole o token da página e ligue a busca para os próximos entrarem.",
+  lead_ads_busca_falhou:
+    "A busca das respostas na Meta não deu certo: o token pode ter vencido, estar sem permissão de leads, ou a Meta não respondeu. Confira o token da página nesta fonte.",
+  lead_ads_fonte_pausada:
+    "A Meta avisou um lead da página desta fonte, mas a fonte está pausada. Reative-a para os próximos entrarem.",
 };
 
 /**
@@ -181,7 +204,7 @@ export async function registrarCaptacao(
   admin: SupabaseClient,
   captacao: CaptacaoParaRegistrar,
 ): Promise<void> {
-  const { error } = await admin.from("webhook_lead_captures").insert({
+  const linha = {
     organization_id: captacao.organizationId,
     webhook_source_id: captacao.webhookSourceId,
     source_name: captacao.sourceName,
@@ -198,19 +221,19 @@ export async function registrarCaptacao(
     user_agent: captacao.userAgent?.slice(0, 500) ?? null,
     origin: captacao.origin ?? null,
     request_id: captacao.requestId ?? null,
-  });
+  };
+  const { error } = await admin.from("webhook_lead_captures").insert(linha);
+  if (!error) return;
 
   // Falha ABERTA na ação (o lead entra de qualquer jeito) e ABERTA na
   // informação: a causa vai para o log nomeada. Um "não gravou o histórico" em
   // silêncio seria indistinguível de "não chegou nada", que é justamente a
   // pergunta que esta tabela veio responder.
-  if (error) {
-    logger.error("[webhooks.captacao] não foi possível registrar o histórico da captação", {
-      organizationId: captacao.organizationId,
-      webhookSourceId: captacao.webhookSourceId,
-      outcome: captacao.outcome,
-      errorCode: error.code,
-      errorMessage: error.message,
-    });
-  }
+  logger.error("[webhooks.captacao] não foi possível registrar o histórico da captação", {
+    organizationId: captacao.organizationId,
+    webhookSourceId: captacao.webhookSourceId,
+    outcome: captacao.outcome,
+    errorCode: error.code,
+    errorMessage: error.message,
+  });
 }

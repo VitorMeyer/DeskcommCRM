@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { countAs, sql, writeCountAs } from "./gov-helpers";
 
 /**
- * 0659 · o canal hospedado por instância, cobrado no banco que o CLONE recebe.
+ * 9412 · o canal hospedado por instância, cobrado no banco que o CLONE recebe.
  *
  * Lê o Postgres descartável que nasce do `supabase/baseline.sql` — o arquivo que
  * o self-hoster aplica. Migration que existe só em `migrations/` não chega a ele.
@@ -27,10 +27,10 @@ import { countAs, sql, writeCountAs } from "./gov-helpers";
  *     O caso semeia a duplicata, re-aplica o bloco EXTRAÍDO DO ARQUIVO e mede.
  */
 
-const ORG_A = "0659aaaa-0000-4000-8000-000000000001";
-const ORG_B = "0659bbbb-0000-4000-8000-000000000002";
-const ADMIN_A = "0659aaaa-1111-4000-8000-000000000001";
-const ADMIN_B = "0659bbbb-1111-4000-8000-000000000002";
+const ORG_A = "9412aaaa-0000-4000-8000-000000000001";
+const ORG_B = "9412bbbb-0000-4000-8000-000000000002";
+const ADMIN_A = "9412aaaa-1111-4000-8000-000000000001";
+const ADMIN_B = "9412bbbb-1111-4000-8000-000000000002";
 const SERVIDOR = "https://servidor.example.test";
 
 function seed(): void {
@@ -81,7 +81,7 @@ function limpar(): void {
   sql(`delete from public.channel_sessions where organization_id in ('${ORG_A}', '${ORG_B}')`);
 }
 
-describe("0659 · a sessão hospedada é uma linha completa ou não existe", () => {
+describe("9412 · a sessão hospedada é uma linha completa ou não existe", () => {
   it("o vocabulário do banco conhece o provider (sessão e arquivo de webhooks)", () => {
     seed();
     expect(inserir(ORG_A)).toContain("ok");
@@ -106,7 +106,7 @@ describe("0659 · a sessão hospedada é uma linha completa ou não existe", () 
   });
 });
 
-describe("0659 · a instância é única entre as ativas", () => {
+describe("9412 · a instância é única entre as ativas", () => {
   it("duas ORGANIZAÇÕES não podem ter a mesma instância no mesmo servidor", () => {
     seed();
     limpar();
@@ -144,7 +144,7 @@ describe("0659 · a instância é única entre as ativas", () => {
   });
 });
 
-describe("0659 · isolamento entre tenants", () => {
+describe("9412 · isolamento entre tenants", () => {
   it("admin da org B NÃO vê, NÃO altera e NÃO cria sessão com o organization_id da org A", () => {
     seed();
     limpar();
@@ -180,8 +180,8 @@ describe("0659 · isolamento entre tenants", () => {
   });
 });
 
-describe("0659 · o apêndice do baseline cura o clone que já tem duplicata", () => {
-  const MARCA = "-- ---- canal hospedado: instância única e ativa (migration 0659) ----";
+describe("9412 · o apêndice do baseline cura o clone que já tem duplicata", () => {
+  const MARCA = "-- ---- canal hospedado: instância única e ativa (migration 9412) ----";
 
   /**
    * O bloco EXTRAÍDO do arquivo, pela ÚLTIMA ocorrência do rótulo. O baseline é

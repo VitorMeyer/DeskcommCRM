@@ -1,0 +1,349 @@
+"use client";
+
+import { useQuery } from "@tanstack/react-query";
+import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
+
+import { apiClient } from "@/lib/api/client";
+import { GATILHO_DE_DATA_DO_FUNIL } from "@/lib/automation/gatilho-de-data-do-funil";
+import { GATILHO_ETAPA_PARADA, GATILHO_SILENCIO } from "@/lib/automation/gatilhos-de-tempo";
+import { OPERADORES_SEM_VALOR, rotuloDoCampoAlterado } from "@/lib/automation/conditions";
+import { CAMPOS_DE_ETIQUETA_GOOGLE_ADS, ROTULOS_DE_ETIQUETA_GOOGLE_ADS } from "@/lib/automation/etiquetas-google-ads";
+import type { DadosDaCaixa, ExtrasDaTela, TipoDeCaixa } from "@/lib/automation/desenho-da-regra";
+import { camposDoFunil } from "@/lib/leads/campos-do-funil";
+import { cn } from "@/lib/utils";
+import { useT } from "@/hooks/i18n/useT";
+import { useAgentsList } from "@/hooks/ai/useAgents";
+import type { FollowupFlowPointerRow } from "@/hooks/followup/useFollowupFlows";
+import { useAssignableMembers } from "@/hooks/inbox/useAssignableMembers";
+import { usePipelineStages, usePipelines, useWebhookSources } from "@/hooks/webhooks/useWebhookSources";
+import { useSectors } from "@/hooks/team/useSectors";
+import type { PlanoDeTarefas } from "@/lib/tarefas/plano";
+import { CURATED_FIELDS, OP_LABELS, type CuratedField, type Op } from "@/app/app/webhooks/_components/RuleEditor";
+import { valorDaCondicaoNaTela } from "@/app/app/webhooks/_components/CondicaoDoContato";
+import { CONDICOES_DO_CONTATO } from "@/lib/automation/conditions";
+import { ACTION_LABELS, TRIGGER_LABELS, type ActionType, type TriggerEvent } from "@/app/app/webhooks/_components/labels";
+
+import { VISUAL_DAS_CONDICOES, VISUAL_DO_GATILHO, visualDaAcao } from "./visual";
+import { rotuloDoMembro } from "@/lib/users/rotulo-do-atendente";
+
+/**
+ * O que o canvas põe em cada caixa: os dados da regra mais o que é só de tela —
+ * `etapa` ("Quando", "Se", "Então · Ação 2") e `eventoDaRegra`, que a caixa de
+ * condições precisa para nomear o campo.
+ */
+export type DadosNaTela = DadosDaCaixa & ExtrasDaTela;
+export type NoDaAutomacao = Node<DadosNaTela, TipoDeCaixa>;
+
+const cfg = (c: Record<string, unknown>, k: string) => (typeof c[k] === "string" ? (c[k] as string) : "");
+
+/* ───────────── descrições que dependem de nomes cadastrados ───────────── */
+
+function DescricaoDoMover({ config }: { config: Record<string, unknown> }) {
+  const t = useT();
+  const { data: funis } = usePipelines();
+  const { data: quadro } = usePipelineStages(cfg(config, "pipeline_id") || null);
+  const funil = funis?.data?.find((p) => p.id === config.pipeline_id);
+  const etapa = quadro?.data?.stages.find((s) => s.id === config.stage_id);
+  if (!funil || !etapa) return <>{t("Escolha o funil e a etapa")}</>;
+  return <>{`${funil.name} › ${etapa.name}`}</>;
+}
+
+// Exportada para o teste do modo novo (#3804): a frase da caixa é o que o
+// operador lê no editor, e é barato provar que ela não volta a "Escolha o atendente".
+export function DescricaoDoAtendente({ config }: { config: Record<string, unknown> }) {
+  const t = useT();
+  const { data: membros } = useAssignableMembers(true);
+  const nomeDe = (userId: unknown) => {
+    const membro = membros?.find((m) => m.user_id === userId);
+    return membro ? rotuloDoMembro(membro, t) : null;
+  };
+  // #2041 — no rodízio, a caixa mostra a fila na ordem em vez de uma pessoa só.
+  if (config.modo === "rodizio") {
+    const fila = Array.isArray(config.fila) ? (config.fila as Array<{ user_id?: unknown }>) : [];
+    const nomes = fila.map((p) => nomeDe(p.user_id)).filter((n): n is string => n !== null);
+    return <>{nomes.length ? `${t("Rodízio")}: ${nomes.join(", ")}` : t("Escolha quem entra no rodízio")}</>;
+  }
+  // #3804 — no destino dinâmico a pessoa só é conhecida no disparo: a caixa diz
+  // QUEM decide e com quem a regra conta se ninguém do negócio puder receber.
+  if (config.modo === "destino") {
+    const destinos = Array.isArray(config.destinos) ? (config.destinos as unknown[]) : [];
+    const nomes = destinos
+      .map((d) => (d === "responsavel_do_negocio" ? t("Responsável do negócio") : d === "dono_da_carteira" ? t("Dono da carteira do contato") : null))
+      .filter((n): n is string => n !== null);
+    const fallback = config.fallback as { modo?: unknown; user_id?: unknown; fila?: unknown } | undefined;
+    const quemDoFallback =
+      fallback?.modo === "rodizio"
+        ? t("Rodízio")
+        : (nomeDe(fallback?.user_id) ?? t("Escolha o atendente"));
+    return (
+      <>
+        {`${nomes.length ? nomes.join(" · ") : t("Escolha pelo menos um destino")} — ${t("fallback")}: ${quemDoFallback}`}
+      </>
+    );
+  }
+  return <>{nomeDe(config.user_id) ?? t("Escolha o atendente")}</>;
+}
+
+function DescricaoDaMensagemPelaIa({ config }: { config: Record<string, unknown> }) {
+  const t = useT();
+  const { data: agentes } = useAgentsList();
+  const agente = agentes?.find((a) => a.id === config.agent_id);
+  const instrucao = cfg(config, "instruction").trim();
+  return <>{`${agente ? agente.name : t("Escolha o agente")}${instrucao ? ` · ${instrucao}` : ""}`}</>;
+}
+
+/** Mesma chave e mesma busca do seletor de fluxo do editor: o cache é um só. */
+function DescricaoDoFluxo({ config }: { config: Record<string, unknown> }) {
+  const t = useT();
+  const { data } = useQuery({
+    queryKey: ["followup", "flows", "list"],
+    queryFn: async () => {
+      const res = await apiClient.get<{ data: FollowupFlowPointerRow[] }>("/api/v1/ai/followup-flows");
+      return res.data;
+    },
+  });
+  const fluxo = (data ?? []).find((f) => f.id === config.flow_pointer_id);
+  return <>{fluxo ? fluxo.name : t("Escolha o fluxo de follow-up")}</>;
+}
+
+/** Mesma chave e mesma busca do seletor de plano do editor. */
+function DescricaoDoPlano({ config }: { config: Record<string, unknown> }) {
+  const t = useT();
+  const { data } = useQuery({
+    queryKey: ["settings", "task-plans"],
+    queryFn: async () =>
+      (await apiClient.get<{ data: { planos: PlanoDeTarefas[] } }>("/api/v1/settings/task-plans")).data,
+  });
+  const plano = data?.planos.find((p) => p.id === config.plano_id);
+  return <>{plano ? plano.nome : t("Escolha o plano de tarefas")}</>;
+}
+
+/** #3727 — a data do comparecimento no campo escolhido: o RÓTULO, não a chave. */
+function DescricaoDaDataDoAtendimento({ config }: { config: Record<string, unknown> }) {
+  const t = useT();
+  const { data: funis } = usePipelines();
+  const funil = funis?.data?.find((p) => p.id === config.pipeline_id);
+  const campo = funil
+    ? camposDoFunil(funil.settings ?? null).find((c) => c.key === cfg(config, "campo"))
+    : undefined;
+  if (!funil) return <>{t("Escolha o funil e o campo de data")}</>;
+  if (!campo) return <>{t("Escolha o campo de data")}</>;
+  return <>{`${funil.name} › ${campo.label}`}</>;
+}
+
+/**
+ * #3881 — o cartão mostra o NOME do setor. Sem caso, a caixa caía no `tipo`
+ * cru (« define_sector ») em todo idioma; e o uuid não diz nada a quem lê a
+ * regra no canvas.
+ */
+function DescricaoDoSetor({ config }: { config: Record<string, unknown> }) {
+  const t = useT();
+  const { data } = useSectors();
+  const setor = data?.data.find((s) => s.id === config.sector_id);
+  return <>{setor ? setor.name : t("Escolha o setor")}</>;
+}
+
+/** A configuração automática também fica legível na caixa da ação salva. */
+export function DescricaoDasEtiquetas({ tipo, config }: { tipo: string; config: Record<string, unknown> }) {
+  const t = useT();
+  const tags = Array.isArray(config.tags) ? (config.tags as unknown[]).map(String) : [];
+  const campos = tipo === "add_tag" && Array.isArray(config.google_ads_fields)
+    ? CAMPOS_DE_ETIQUETA_GOOGLE_ADS.filter((campo) => (config.google_ads_fields as unknown[]).includes(campo))
+    : [];
+  const partes = [...tags];
+  if (campos.length) partes.push(`Google Ads: ${campos.map((campo) => t(ROTULOS_DE_ETIQUETA_GOOGLE_ADS[campo])).join(", ")}`);
+  return <>{partes.length ? partes.join(", ") : t("Escreva pelo menos uma tag")}</>;
+}
+
+function DescricaoDaAcao({ tipo, config }: { tipo: string; config: Record<string, unknown> }) {
+  const t = useT();
+  switch (tipo as ActionType) {
+    case "create_or_move_lead":
+      return <DescricaoDoMover config={config} />;
+    case "assign_owner":
+      return <DescricaoDoAtendente config={config} />;
+    case "send_ai_message":
+      return <DescricaoDaMensagemPelaIa config={config} />;
+    case "start_message_flow":
+      return <DescricaoDoFluxo config={config} />;
+    case "apply_task_plan":
+      return <DescricaoDoPlano config={config} />;
+    case "send_whatsapp_message": {
+      const texto = cfg(config, "template").trim();
+      return <>{texto ? `“${texto}”` : t("Escreva a mensagem")}</>;
+    }
+    // O e-mail de saída não tinha caso: o cartão caía no `tipo` cru e dizia « send_email » em todo idioma.
+    case "send_email": {
+      const assunto = cfg(config, "assunto").trim();
+      return <>{assunto ? `“${assunto}”` : t("Escreva o e-mail")}</>;
+    }
+    // #2642 — mesmo defeito do e-mail: sem caso, o cartão dizia « notify_team » cru.
+    case "notify_team":
+      return <>{t("WhatsApp da equipe")}</>;
+    case "add_tag":
+    case "remove_tag":
+      return <DescricaoDasEtiquetas tipo={tipo} config={config} />;
+    case "call_webhook":
+      return <>{cfg(config, "url").trim() || t("Informe o endereço")}</>;
+    case "create_task": {
+      const titulo = cfg(config, "titulo").trim() || t("Sem título");
+      const dias = typeof config.vence_em_dias === "number" ? config.vence_em_dias : 0;
+      return <>{`${titulo} · ${dias ? `${t("vence em")} ${dias} ${dias === 1 ? t("dia") : t("dias")}` : t("vence hoje")}`}</>;
+    }
+    // #3727 — sem caso, a caixa cairia no `tipo` cru (« set_lead_date_field »).
+    case "set_lead_date_field":
+      return <DescricaoDaDataDoAtendimento config={config} />;
+    // #3881 — mesmo defeito: sem caso, a caixa dizia « define_sector ».
+    case "define_sector":
+      return <DescricaoDoSetor config={config} />;
+  }
+  return <>{tipo}</>;
+}
+
+function DescricaoDoGatilho({ dados }: { dados: Extract<DadosDaCaixa, { kind: "gatilho" }> }) {
+  const t = useT();
+  const { data: fontes } = useWebhookSources();
+  const { data: funis } = usePipelines();
+  const evento = dados.evento as TriggerEvent | "";
+  if (!evento) return <>{t("Escolha o que dispara a automação")}</>;
+  const rotulo = t(TRIGGER_LABELS[evento] ?? evento);
+  let detalhe = "";
+  if (evento === "lead.created") {
+    const fonte = fontes?.data?.find((f) => f.id === dados.tela.fonte);
+    detalhe = dados.tela.fonte ? (fonte ? fonte.name : t("Fonte removida")) : t("Qualquer fonte");
+  } else if (evento === GATILHO_DE_DATA_DO_FUNIL) {
+    const funil = funis?.data?.find((p) => p.id === dados.tela.data.pipeline_id);
+    const campo = funil ? camposDoFunil(funil.settings ?? null).find((c) => c.key === dados.tela.data.campo) : undefined;
+    detalhe = campo ? `${campo.label} · N = ${dados.tela.data.dias}` : t("Escolha o funil e o campo de data");
+  } else if (evento === GATILHO_SILENCIO || evento === GATILHO_ETAPA_PARADA) {
+    detalhe = `N = ${dados.tela.tempo.dias}`;
+  }
+  return <>{detalhe ? `${rotulo} · ${detalhe}` : rotulo}</>;
+}
+
+function DescricaoDasCondicoes({ dados, evento }: { dados: Extract<DadosDaCaixa, { kind: "condicoes" }>; evento: string }) {
+  const t = useT();
+  const { data: funis } = usePipelines();
+  const padrao = funis?.data?.find((p) => p.is_default) ?? funis?.data?.[0] ?? null;
+  const { data: quadro } = usePipelineStages(padrao?.id ?? null);
+  // `is_empty`/`is_not_empty` não pedem valor: contá-los por `value.trim()`
+  // dizia "nenhuma condição completa" para uma caixa que TEM condição — e a
+  // caixa passava a prometer "roda em todo evento" para a regra que só dispara
+  // quando o campo está vazio (#2727).
+  const completas = dados.linhas.filter((l) => l.field.trim() && (OPERADORES_SEM_VALOR.has(l.op) || l.value.trim()));
+  // O grupo do topo não é desenhável: a caixa diz o que é, em vez de mentir.
+  if (dados.grupoPreservado) return <>{t("Grupo de condições que este desenho não edita")}</>;
+  if (completas.length === 0) return <>{t("Nenhuma condição completa: roda em todo evento")}</>;
+  // As condições do contato (#3814) valem em qualquer gatilho: o rótulo delas
+  // não está na tabela por evento, e sem esta linha o cartão mostraria o
+  // caminho técnico (`contato.followup_vivo`) para o operador.
+  const campos: CuratedField[] = [
+    ...(CURATED_FIELDS[evento as TriggerEvent] ?? []),
+    ...CONDICOES_DO_CONTATO,
+  ];
+  const primeira = completas[0]!;
+  const campo = campos.find((c) => c.value === primeira.field);
+  const op = t(campo?.lista && primeira.op === "contains" ? "tem a tag" : OP_LABELS[primeira.op as Op]);
+  const valor =
+    campo?.kind === "stage"
+      ? (quadro?.data?.stages.find((s) => s.id === primeira.value)?.name ?? primeira.value)
+      : campo?.kind === "sim_nao"
+        ? valorDaCondicaoNaTela(primeira.value, t)
+        : primeira.op === "campo_alterado"
+          ? t(rotuloDoCampoAlterado(primeira.value))
+          : primeira.value;
+  // `esta vazio`/`esta preenchido` não pedem valor: a frase termina no operador,
+  // sem o trecho do valor — montá-lo dizia « Nome do lead está vazio “” » (#2727).
+  const alvo = `${campo ? t(campo.label) : primeira.field} ${op}`;
+  const frase = OPERADORES_SEM_VALOR.has(primeira.op) ? alvo : `${alvo} “${valor}”`;
+  return <>{completas.length > 1 ? `${frase} (+${completas.length - 1})` : frase}</>;
+}
+
+/* ───────────── a caixa ───────────── */
+
+/**
+ * O cartão de uma caixa do designer: o MESMO desenho do cartão do construtor de
+ * follow-up (`NodeCard`), com a etapa da fila em cima do título. Entrada em
+ * cima, saída embaixo — numa automação a ordem é a fila, então cada caixa tem
+ * uma de cada (o gatilho só tem saída).
+ */
+export function CaixaDaAutomacao({ id, data, selected }: NodeProps<NoDaAutomacao>) {
+  const t = useT();
+  const problemas = data.problemas ?? [];
+  const temProblema = problemas.length > 0;
+  const visual =
+    data.kind === "gatilho" ? VISUAL_DO_GATILHO : data.kind === "condicoes" ? VISUAL_DAS_CONDICOES : visualDaAcao(data.acao.type);
+  const Icone = visual.icon;
+  const titulo =
+    data.kind === "gatilho"
+      ? t("Gatilho")
+      : data.kind === "condicoes"
+        ? t("Condições")
+        : data.acao.type === "ai_decide"
+          ? t("A IA decide")
+          : t(ACTION_LABELS[data.acao.type as ActionType] ?? data.acao.type);
+  const opcoes =
+    data.kind === "acao" && data.acao.type === "ai_decide" && Array.isArray(data.acao.config.opcoes)
+      ? (data.acao.config.opcoes as Array<{ rotulo?: unknown; acao?: { type?: unknown } | null }>)
+      : null;
+
+  return (
+    <div
+      className={cn(
+        "w-56 rounded-md border border-l-4 border-border bg-surface shadow-sm transition-shadow",
+        visual.borderClassName,
+        selected && "ring-2 ring-accent-500 ring-offset-1 ring-offset-bg",
+        temProblema && "border-error ring-2 ring-error ring-offset-1 ring-offset-bg",
+      )}
+      data-testid={`caixa-${id}`}
+      title={temProblema ? problemas.map((p) => t(p.mensagem)).join("; ") : undefined}
+    >
+      {data.kind !== "gatilho" && <Handle type="target" position={Position.Top} />}
+      <div className="flex items-start gap-2 px-3 py-2">
+        <span className={cn("mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full", visual.chipClassName)}>
+          <Icone size={14} aria-hidden />
+        </span>
+        <div className="min-w-0 flex-1">
+          {data.etapa ? (
+            <p className="text-[10px] font-medium uppercase tracking-wide text-text-muted">{data.etapa}</p>
+          ) : null}
+          <p className="line-clamp-2 break-words text-sm font-medium text-text">{titulo}</p>
+          <p className="line-clamp-2 break-words text-xs text-text-muted">
+            {data.kind === "gatilho" ? (
+              <DescricaoDoGatilho dados={data} />
+            ) : data.kind === "condicoes" ? (
+              <DescricaoDasCondicoes dados={data} evento={data.eventoDaRegra ?? ""} />
+            ) : data.acao.type === "ai_decide" ? (
+              t("Hoje este passo só se edita pela API")
+            ) : (
+              <DescricaoDaAcao tipo={data.acao.type} config={data.acao.config} />
+            )}
+          </p>
+        </div>
+      </div>
+      {data.kind === "condicoes" && (
+        <p className="border-t border-border/60 px-3 py-1.5 text-xs italic text-text-muted">
+          {t("Se não atender, nada acontece.")}
+        </p>
+      )}
+      {opcoes && (
+        <ul className="border-t border-border/60 px-3 py-1.5" data-testid={`caixa-${id}-opcoes`}>
+          {opcoes.map((o, i) => (
+            <li key={i} className="line-clamp-2 break-words text-xs text-text-muted">
+              {`${typeof o.rotulo === "string" ? o.rotulo : "—"} → ${
+                typeof o.acao?.type === "string" ? t(ACTION_LABELS[o.acao.type as ActionType] ?? o.acao.type) : "—"
+              }`}
+            </li>
+          ))}
+        </ul>
+      )}
+      {temProblema && (
+        <p className="border-t border-error/30 px-3 py-1.5 text-xs leading-snug text-error-fg" data-testid={`caixa-${id}-problema`}>
+          {t(problemas[0]!.mensagem)}
+          {problemas.length > 1 ? ` (+${problemas.length - 1})` : ""}
+        </p>
+      )}
+      <Handle type="source" position={Position.Bottom} />
+    </div>
+  );
+}

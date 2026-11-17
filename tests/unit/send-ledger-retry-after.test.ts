@@ -16,6 +16,7 @@ describe("retry-after da entrega", () => {
       rotate: vi.fn(async () => "ledger-2"),
       message: vi.fn(async () => null),
       update: vi.fn(async () => {}),
+      setMediaPath: vi.fn(async () => "storage/path"),
     };
 
     const result = await sendWithLedger(store, {
@@ -45,6 +46,7 @@ describe("retry-after da entrega", () => {
       rotate: vi.fn(async () => "ledger-rotated"),
       message: vi.fn(async () => null),
       update: vi.fn(async () => {}),
+      setMediaPath: vi.fn(async () => "storage/path"),
     };
 
     const result = await sendWithLedger(store, {
@@ -78,6 +80,8 @@ describe("retry-after da entrega", () => {
       "worker-1",
       30_000,
       "envio queued — reagendado sem consumir attempts",
+      null,
+      // `payloadPatch` (#3383): o adiamento do envio não grava rastro no payload.
       null,
     ]);
     expect(query.mock.calls[0]![0]).toContain("attempts = greatest(attempts - 1, 0)");

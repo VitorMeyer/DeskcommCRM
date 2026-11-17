@@ -10,8 +10,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useT } from "@/hooks/i18n/useT";
 import { apiClient } from "@/lib/api/client";
-import type { Intervalo } from "@/lib/cobranca/vocabulario";
+import { cadastroExigeEscolhaDePlano } from "@/lib/cobranca/cadastro";
+import { MOEDAS, type Intervalo, type Moeda } from "@/lib/cobranca/vocabulario";
 import { useIdioma } from "@/lib/i18n/IdiomaProvider";
+import { formatCents } from "@/lib/money";
 import { novoPlanoSchema } from "@/lib/schemas/cobranca-plano";
 
 /** Um plano de `cobranca_planos` como a tela o recebe (COLUNAS_DO_PLANO). */
@@ -19,6 +21,8 @@ export interface PlanoDaTela {
   id: string;
   nome: string;
   preco_cents: number;
+  /** A moeda do plano (migration 9332). Só se escolhe ao criar. */
+  moeda: Moeda;
   intervalo: Intervalo;
   trial_dias: number;
   max_assentos: number | null;
@@ -33,6 +37,7 @@ export interface PlanoDaTela {
 interface Campos {
   nome: string;
   preco: string;
+  moeda: Moeda;
   intervalo: Intervalo;
   trial_dias: string;
   max_assentos: string;
@@ -40,9 +45,9 @@ interface Campos {
   teto_ia: string;
 }
 
-const VAZIO: Campos = { nome: "", preco: "", intervalo: "mes", trial_dias: "14", max_assentos: "", max_canais: "", teto_ia: "" };
+const VAZIO: Campos = { nome: "", preco: "", moeda: "BRL", intervalo: "mes", trial_dias: "14", max_assentos: "", max_canais: "", teto_ia: "" };
 const AVISO_DE_CAMPOS =
-  "Confira os campos do plano: preço a partir de R$ 5,00, teste grátis de 0 a 90 dias e limites a partir de 1.";
+  "Confira os campos do plano: preço a partir de 5,00 na moeda do plano, teste grátis de 0 a 90 dias e limites a partir de 1.";
 
 const centavos = (v: string) => Math.round(Number(v.replace(",", ".")) * 100);
 const inteiroOuNulo = (v: string) => (v.trim() === "" ? null : Number(v));
@@ -65,6 +70,7 @@ function camposDe(p: PlanoDaTela): Campos {
   return {
     nome: p.nome,
     preco: decimal(p.preco_cents),
+    moeda: p.moeda,
     intervalo: p.intervalo,
     trial_dias: String(p.trial_dias),
     max_assentos: p.max_assentos === null ? "" : String(p.max_assentos),
@@ -85,9 +91,8 @@ export function PlanosDaInstalacao({ planos }: { planos: readonly PlanoDaTela[] 
   const [campos, setCampos] = useState<Campos>(VAZIO);
   const [editando, setEditando] = useState<string | null>(null);
   const [salvando, setSalvando] = useState(false);
-  const brl = new Intl.NumberFormat(idioma, { style: "currency", currency: "BRL" });
   const usd = new Intl.NumberFormat(idioma, { style: "currency", currency: "USD" });
-  const campo = (k: Exclude<keyof Campos, "intervalo">) => ({
+  const campo = (k: Exclude<keyof Campos, "intervalo" | "moeda">) => ({
     value: campos[k],
     onChange: (e: ChangeEvent<HTMLInputElement>) => setCampos({ ...campos, [k]: e.target.value }),
   });
@@ -102,8 +107,9 @@ export function PlanosDaInstalacao({ planos }: { planos: readonly PlanoDaTela[] 
     }
     setSalvando(true);
     try {
+      // A moeda vai só na criação: a edição não troca a moeda de um plano (migration 9332).
       if (editando) await apiClient.patch(`/api/v1/admin/cobranca/planos/${editando}`, corpo);
-      else await apiClient.post("/api/v1/admin/cobranca/planos", corpo);
+      else await apiClient.post("/api/v1/admin/cobranca/planos", { ...corpo, moeda: campos.moeda });
       toast.success(t("Plano salvo."));
       setCampos(VAZIO);
       setEditando(null);
@@ -134,9 +140,25 @@ export function PlanosDaInstalacao({ planos }: { planos: readonly PlanoDaTela[] 
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1">
-            <Label htmlFor="plano-preco">{t("Preço (R$)")}</Label>
+            <Label htmlFor="plano-moeda">{t("Moeda")}</Label>
+            <select
+              id="plano-moeda"
+              className="h-9 w-full rounded-md border bg-background px-2 text-sm disabled:opacity-60"
+              value={campos.moeda}
+              disabled={editando !== null}
+              onChange={(e) => setCampos({ ...campos, moeda: e.target.value as Moeda })}
+            >
+              {MOEDAS.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="plano-preco">{`${t("Preço")} (${campos.moeda})`}</Label>
             <Input id="plano-preco" inputMode="decimal" {...campo("preco")} />
           </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1">
             <Label htmlFor="plano-intervalo">{t("Intervalo de cobrança")}</Label>
             <select
@@ -152,7 +174,10 @@ export function PlanosDaInstalacao({ planos }: { planos: readonly PlanoDaTela[] 
         </div>
         <div className="space-y-1">
           <Label htmlFor="plano-trial">{t("Dias de teste grátis")}</Label>
-          <Input id="plano-trial" inputMode="numeric" {...campo("trial_dias")} />
+          <Input id="plano-trial" inputMode="numeric" aria-describedby="plano-trial-dica" {...campo("trial_dias")} />
+          <p id="plano-trial-dica" className="text-xs text-muted-foreground">
+            {t("0 = entrada paga: a empresa que entra neste plano fica suspensa até o primeiro pagamento.")}
+          </p>
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1">
@@ -182,6 +207,15 @@ export function PlanosDaInstalacao({ planos }: { planos: readonly PlanoDaTela[] 
       </form>
 
       <div className="space-y-2">
+        {/* O critério do gatilho da 0679 (doc 146): com plano oferecido e sem padrão, quem se cadastra é obrigado a escolher. */}
+        {cadastroExigeEscolhaDePlano({
+          padraoId: planos.find((p) => p.padrao_no_cadastro && !p.arquivado_em)?.id ?? null,
+          oferecidos: planos.filter((p) => p.oferecido_ao_cliente && !p.arquivado_em),
+        }) && (
+          <p role="status" className="rounded-md border border-amber-300/60 bg-amber-50 px-3 py-2 text-sm dark:border-amber-500/30 dark:bg-amber-950/20">
+            {t("Nenhum plano está marcado para o cadastro. Quem se cadastra precisa escolher um plano, o “Entrar com Google” some da tela de cadastro e empresas criadas sem plano pela integração são recusadas. Use “Usar no cadastro” em um plano.")}
+          </p>
+        )}
         <p className="text-xs text-muted-foreground">
           {t("O preço e o intervalo de um plano travam quando alguém o assina: para mudar, arquive e crie outro.")}
         </p>
@@ -201,7 +235,7 @@ export function PlanosDaInstalacao({ planos }: { planos: readonly PlanoDaTela[] 
                     {!p.oferecido_ao_cliente && <span className="ml-2 rounded-md bg-muted px-1.5 py-0.5 text-xs">{t("Só você atribui")}</span>}
                   </p>
                   <p className="text-muted-foreground">
-                    {brl.format(p.preco_cents / 100)} {p.intervalo === "mes" ? t("por mês") : t("por ano")} · {p.trial_dias} {t("dias de teste")}
+                    {formatCents(p.preco_cents, p.moeda)} {p.intervalo === "mes" ? t("por mês") : t("por ano")} · {p.trial_dias} {t("dias de teste")}
                   </p>
                   <p className="text-muted-foreground">
                     {t("Pessoas")}: {limite(p.max_assentos)} · {t("Números conectados")}: {limite(p.max_canais)} · {t("IA")}:{" "}

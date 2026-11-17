@@ -9,8 +9,13 @@ import { modoDeCadastro } from "@/lib/auth/politica-de-cadastro";
 import { createClient } from "@/lib/supabase/server";
 import { idiomaDoVisitante } from "@/lib/i18n/idiomaAnonimo";
 import { traduzir } from "@/lib/i18n/dicionario";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { lerCadastroNaTela, planoInicialDoSeletor, planosNaMoedaDoLink } from "@/lib/cobranca/cadastro";
+import { selecionarPlanoDoLink } from "@/lib/cobranca/selecao-do-link";
+import { tituloDaTelaPublica } from "@/lib/i18n/titulo-da-tela-publica";
 
-export const metadata = { title: "Criar conta" };
+// A aba no idioma do visitante, como o corpo (`lib/i18n/titulo-da-tela-publica.ts`).
+export const generateMetadata = () => tituloDaTelaPublica((t) => t("Criar conta"));
 
 /**
  * Aceita `?invite=<token>`: é o caminho de quem foi convidado e ainda não tem
@@ -37,9 +42,9 @@ export const metadata = { title: "Criar conta" };
 export default async function SignupPage({
   searchParams,
 }: {
-  searchParams: Promise<{ invite?: string }>;
+  searchParams: Promise<{ invite?: string; plano?: string | string[]; moeda?: string | string[] }>;
 }) {
-  const { invite } = await searchParams;
+  const { invite, plano, moeda } = await searchParams;
   const payload = invite ? verifyInviteToken(invite) : null;
   const convite = invite && payload ? { token: invite, email: payload.email } : undefined;
   const conviteExpirado = Boolean(invite) && !payload;
@@ -56,6 +61,24 @@ export default async function SignupPage({
   // acima do `.env`, e nunca lança) — `branding()` só veria a semente do `.env`,
   // e o convite não muda isso (#2511, mesmo defeito das páginas `/legal`).
   const marca = await marcaDaSaida(null);
+  // Com plano oferecido, o seletor aparece. O Google não leva a escolha: ele
+  // some enquanto não há plano padrão — o gatilho recusaria a empresa —, e com
+  // padrão a empresa dele nasce no padrão. Sem plano nenhum, nasce isenta e o
+  // Google fica (doc 146, opção B). O critério é o de `lib/cobranca/cadastro.ts`,
+  // o mesmo do gatilho. Leitura que falha não esconde nada: quem recusa é a action.
+  const cadastro = convite ? null : await lerCadastroNaTela(createAdminClient());
+  // Migration 9332: o link escolhe a moeda (`?moeda=`, ou a do `?plano=`), e o
+  // seletor mostra só os planos nela. Sem pedido, a lista inteira, como sempre.
+  const planos = planosNaMoedaDoLink(cadastro?.oferecidos ?? [], { moeda, plano });
+  const selecao = selecionarPlanoDoLink(
+    plano,
+    planos,
+    planoInicialDoSeletor(planos, cadastro?.padraoId ?? null),
+    Boolean(invite),
+  );
+  // O Google atual cria no padrão; um link que escolheu um plano oferecido não
+  // pode perdê-la. Link inválido ou instalação sem plano seguem a regra de sempre.
+  const googleSemPlano = (cadastro?.exigeEscolha ?? false) || selecao.linkEscolheuPlano;
 
   // Convite VÁLIDO passa em qualquer modo — é o ponto inteiro do convite.
   const modo = convite ? null : await modoDeCadastro();
@@ -112,14 +135,35 @@ export default async function SignupPage({
         </p>
       )}
 
-      <SignupForm convite={convite} />
+      {selecao.linkInvalido && (
+        <p role="alert" className="rounded-md border border-amber-300/60 bg-amber-50 px-4 py-3 text-sm dark:border-amber-500/30 dark:bg-amber-950/20">
+          {t("O plano deste link não está disponível. Confira o plano e o período no seletor antes de continuar.")}
+        </p>
+      )}
+      <SignupForm convite={convite} planos={planos} planoInicial={selecao.planoInicial} />
       {/* O convite atravessa o Google na URL de retorno: sem ele, quem foi
           convidado e cria a conta com Google ganharia uma empresa própria. */}
-      <EntrarComGoogle convite={convite?.token} />
+      {googleSemPlano ? (
+        <p className="text-center text-xs text-muted-foreground">{t("Para garantir que o plano selecionado seja contratado, conclua o cadastro com e-mail e senha.")}</p>
+      ) : (
+        <>
+          <EntrarComGoogle convite={convite?.token} />
+          {planos.length > 0 && (
+            <p className="text-center text-xs text-muted-foreground">{t("Com o Google, a empresa começa no plano padrão. Para escolher outro, use e-mail e senha.")}</p>
+          )}
+        </>
+      )}
 
       <p className="text-center text-sm text-muted-foreground">
         {t("Já tem conta?")}{" "}
-        <Link href="/login" className="font-medium text-foreground underline underline-offset-4">
+        <Link
+          href={
+            convite
+              ? `/login?next=${encodeURIComponent(`/team/accept-invite/${convite.token}`)}`
+              : "/login"
+          }
+          className="font-medium text-foreground underline underline-offset-4"
+        >
           {t("Entrar")}
         </Link>
       </p>

@@ -27,7 +27,10 @@ import { apiClient } from "@/lib/api/client";
 import { ROLE_RANK } from "@/lib/auth/types";
 import { useBulkAction } from "@/hooks/kanban/useBulkAction";
 import { resolveVocabulary } from "@/lib/kanban/vocabulary";
+import { filtrarEtiquetas } from "@/lib/kanban/filtrar-etiquetas";
 import type { PipelineVocabulary, Stage } from "@/lib/kanban/types";
+import { LoseLeadDialog } from "./LoseLeadDialog";
+import { rotuloDoMembro } from "@/lib/users/rotulo-do-atendente";
 
 interface BulkActionBarProps {
   selectedIds: string[];
@@ -66,6 +69,7 @@ export function BulkActionBar({
   const vocab = resolveVocabulary(vocabulary);
   const bulk = useBulkAction(pipelineId);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [loseOpen, setLoseOpen] = useState(false);
   const [tagInput, setTagInput] = useState("");
   // D10: só olha propostas quando a confirmação de excluir abre, e no máximo
   // 50 negócios (o mesmo teto que a rota em lote já aplica por chamada) — um
@@ -123,9 +127,11 @@ export function BulkActionBar({
   // heurística que erra ("Negociação" → "Negociaçãos"), e a contagem já diz
   // tudo que o plural diria: "12 selecionados" não fica pior que "12 Pacientes
   // selecionados", e nunca fica errado.
+  // O card é o NEGÓCIO (`vocab.deal`: "Pedido" no e-commerce), não a pessoa
+  // (`vocab.lead`: "Cliente") — o resto do funil já chama o card de negócio (#3811).
   const rotuloDaContagem =
     selectedIds.length === 1
-      ? `1 ${vocab.lead} ${t("selecionado")}`
+      ? `1 ${t(vocab.deal)} ${t("selecionado")}`
       : `${selectedIds.length} ${t("selecionados")}`;
 
   const runMove = (stageId: string) => {
@@ -189,6 +195,30 @@ export function BulkActionBar({
     );
   };
 
+  // F2 (#2484): "Marcar como perdido" em lote = mover para a etapa de PERDA do
+  // funil com UM motivo único, pela `leads/bulk` que já decide o motivo (#917,
+  // ação `move`, `params.lost_reason`). Nada de rota nova: o diálogo de motivo é
+  // o MESMO do card (`LoseLeadDialog`) e a escrita é a rota que já existe.
+  //
+  // A ação só existe onde o funil TEM etapa de perda: sem ela o lote cairia em
+  // `pipeline_no_lost_stage`/404 depois do clique. O card tem a mesma ação
+  // porque o funil dele sempre tem a etapa (o `lose` a procura no servidor);
+  // aqui ela não é garantida pela tela, então o gatilho é condicionado — o
+  // `stages` que a barra já recebe diz quem é.
+  const etapaDePerda = stages.find((s) => s.is_lost) ?? null;
+
+  const runLose = async (motivo: string) => {
+    if (!etapaDePerda) return;
+    const res = await bulk.mutateAsync({
+      action: "move",
+      lead_ids: selectedIds,
+      params: { stage_id: etapaDePerda.id, lost_reason: motivo },
+    });
+    const n = res.data.updated_count;
+    toast.success(`${n} ${t(n > 1 ? "marcados como perdidos." : "marcado como perdido.")}`);
+    onClear();
+  };
+
   return (
     <>
       {/* `w-fit` sozinho não tinha teto: seis itens (rótulo + 5 ações) numa
@@ -237,7 +267,7 @@ export function BulkActionBar({
                 .filter((m) => m.user_id !== user.id)
                 .map((m) => (
                   <DropdownMenuItem key={m.user_id} onClick={() => runAssign(m.user_id)}>
-                    {m.full_name ?? t("Sem nome")}
+                    {rotuloDoMembro(m, t)}
                   </DropdownMenuItem>
                 ))}
               <DropdownMenuSeparator />
@@ -296,8 +326,7 @@ export function BulkActionBar({
                 {t("Adicionar")}
               </Button>
             </div>
-            {tagsExistentes
-              .filter((tag) => tag.toLowerCase().includes(tagInput.trim().toLowerCase()))
+            {filtrarEtiquetas(tagsExistentes, tagInput)
               .slice(0, 10)
               .map((tag) => (
                 <DropdownMenuItem key={tag} onClick={() => runTagAdd(tag)}>
@@ -307,6 +336,17 @@ export function BulkActionBar({
               ))}
           </DropdownMenuContent>
         </DropdownMenu>
+
+        {etapaDePerda && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setLoseOpen(true)}
+            disabled={bulk.isPending}
+          >
+            {t("Marcar como perdido…")}
+          </Button>
+        )}
 
         <Button
           size="sm"
@@ -327,7 +367,7 @@ export function BulkActionBar({
           <DialogHeader>
             <DialogTitle>
               {selectedIds.length === 1
-                ? `${t("Excluir")} 1 ${vocab.lead}?`
+                ? `${t("Excluir")} 1 ${t(vocab.deal)}?`
                 : `${t("Excluir")} ${selectedIds.length} ${t("selecionados")}?`}
             </DialogTitle>
             <DialogDescription>
@@ -347,6 +387,21 @@ export function BulkActionBar({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* F2 (#2484): o MESMO diálogo de motivo do card, reusado — em modo lote
+          ele entrega o motivo escolhido ao `runLose`, que escreve pela
+          `leads/bulk`. Motivo é obrigatório (o diálogo já barra o "Confirmar"
+          sem motivo) e a escrita respeita organização/permissão de cada item na
+          rota. Só monta quando há etapa de perda (mesmo gate do gatilho). */}
+      {etapaDePerda && (
+        <LoseLeadDialog
+          open={loseOpen}
+          onOpenChange={setLoseOpen}
+          pipelineId={pipelineId}
+          onConfirm={runLose}
+          submitting={bulk.isPending}
+        />
+      )}
     </>
   );
 }

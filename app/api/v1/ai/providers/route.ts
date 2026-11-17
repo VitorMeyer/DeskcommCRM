@@ -29,12 +29,14 @@ import {
   decidirBinding,
   escolherModeloEconomico,
   EXPLICACAO_DA_ORIGEM,
+  PONTOS_DO_AGENTE_COM_ESCOLHA_NO_PAINEL,
   PONTOS_DO_AGENTE_PUBLICADO,
   PONTOS_QUE_HERDAM_DO_AGENTE,
   type LinhaDeBinding,
 } from "@/lib/ai/pontos/resolver";
 import { PAPEIS, PONTOS_DE_IA, PONTO_POR_ID } from "@/lib/ai/pontos/registro";
 import { PROVEDORES, ehProvedorSuportado, PROVEDOR_POR_ASSINATURA } from "@/lib/ai/pontos/provedores";
+import { ehProvedorDeServicoSuportado } from "@/lib/ai/pontos/provedores-de-servico";
 import { listarModelosDaAssinaturaOuVazio } from "@/lib/ai/catalogo/modelos-da-assinatura";
 import { validarBinding } from "@/lib/ai/pontos/validar-binding";
 import { lerAmbiente } from "@/lib/instalacao/ambiente";
@@ -141,7 +143,7 @@ export async function GET(): Promise<Response> {
   const temAssinatura = (credsRes.data ?? []).some(
     (credential) => credential.provider === PROVEDOR_POR_ASSINATURA,
   );
-  // A listagem da assinatura só ALIMENTA esta tela: se o backend do Codex
+  // A listagem da assinatura só ALIMENTA esta tela: se a API do catálogo SIWC
   // falhar, a tela de Credenciais continua abrindo (com a lista vazia e o
   // motivo no log) — o editor do agente é quem recebe o erro de cara (#2602).
   const modelosDaAssinatura = temAssinatura
@@ -193,6 +195,15 @@ export async function GET(): Promise<Response> {
           }
         : null,
     chaveOpenai: async () => chaveExiste("openai"),
+    // Degrau 0: o mesmo critério do worker — binding ligado no Scribe E chave
+    // do ElevenLabs existente. Sem a chave, a tela anuncia o degrau seguinte,
+    // que é o que o worker de fato roda.
+    elevenlabsEscolhido: async () => {
+      const b = bindings.get("transcricao_de_audio");
+      return b?.is_enabled && b.provider === "elevenlabs" && chaveExiste("elevenlabs")
+        ? { apiKey: "chave-existente", modelId: b.model_id ?? "scribe_v1" }
+        : null;
+    },
   });
 
   const pontos = PONTOS_DE_IA.map((ponto) => {
@@ -203,9 +214,13 @@ export async function GET(): Promise<Response> {
       // herança é a PRESENÇA do `llmOverride`, e esta tela não tem esse sinal:
       // passar o agente para todo ponto faria a coluna "está usando" anunciar o
       // modelo do agente em ponto que nunca o herda — a mesma tela que mente,
-      // virada do avesso.
+      // virada do avesso. O follow-up (`PONTOS_DO_AGENTE_COM_ESCOLHA_NO_PAINEL`)
+      // entra: sem escolha no painel, ele É o agente — e a tela tem de anunciar
+      // o modelo da versão publicada, não o padrão da organização.
       agentePublicado:
-        PONTOS_DO_AGENTE_PUBLICADO.has(ponto.id) || PONTOS_QUE_HERDAM_DO_AGENTE.has(ponto.id)
+        PONTOS_DO_AGENTE_PUBLICADO.has(ponto.id) ||
+        PONTOS_DO_AGENTE_COM_ESCOLHA_NO_PAINEL.has(ponto.id) ||
+        PONTOS_QUE_HERDAM_DO_AGENTE.has(ponto.id)
           ? agentePublicado
           : null,
       // DÍVIDA, não impossibilidade. A justificativa aqui dizia "o servidor web
@@ -324,10 +339,16 @@ const corpoDoPut = z.object({
   // API é pública) gravava `provider: "foobar"`, a rota respondia 200, e todo
   // uso daquele ponto morria em produção com provedor desconhecido. Metade da
   // defesa transferida e nunca instalada.
+  //
+  // Também aceita provedor de SERVIÇO (voz, hoje): um ponto fixo-com-menu
+  // (`transcricao_de_audio`) pode gravar `provider: "elevenlabs"`, que não
+  // está em `ehProvedorSuportado` (lista de chat). Qual provider vale para
+  // qual PONTO é checado abaixo, em `validarBinding` — aqui só se confirma
+  // que a instalação CONHECE o provider, de algum dos dois mundos.
   provider: z
     .string()
     .min(1)
-    .refine(ehProvedorSuportado, {
+    .refine((p) => ehProvedorSuportado(p) || ehProvedorDeServicoSuportado(p), {
       message:
         "provedor não suportado por esta instalação — escolha um da lista em Agente de IA → Provedores",
     }),
@@ -369,20 +390,39 @@ export async function PUT(req: NextRequest): Promise<Response> {
     .is("deprecated_at", null)
     .maybeSingle();
 
+  // Modelos da assinatura são por organização e não entram no catálogo global
+  // `ai_models`. Resolva o catálogo da conta conectada para validar capacidades
+  // com a mesma informação que alimenta o seletor da tela. Se a consulta falhar
+  // (rede, 401/403), o modelo fica "desconhecido" e grava com aviso — o mesmo
+  // caminho de antes —, em vez de a falha virar um 500 na gravação.
+  const modeloDaAssinatura =
+    corpo.provider === PROVEDOR_POR_ASSINATURA
+      ? (await listarModelosDaAssinaturaOuVazio(org.orgId)).find((m) => m.model_id === corpo.model_id) ?? null
+      : null;
+  const modeloConhecido =
+    corpo.provider === PROVEDOR_POR_ASSINATURA ? modeloDaAssinatura !== null : modelo !== null;
+
   const validacao = validarBinding({
     pontoId: corpo.purpose,
+    provider: corpo.provider,
     modelo: {
       model_id: corpo.model_id,
-      supports_tools: modelo?.supports_tools ?? false,
+      supports_tools:
+        corpo.provider === PROVEDOR_POR_ASSINATURA
+          ? modeloDaAssinatura?.supports_tools ?? false
+          : modelo?.supports_tools ?? false,
       // A capacidade vem do MOTOR, não da coluna: os dois discordavam e a tela
       // avisava "não enxerga imagens" sobre modelo que enxerga. Ver
       // `lib/ai/pontos/capacidade-em-vigor.ts`.
       supports_vision: enxergaImagem({
-        provider: corpo.provider,
+        provider: modeloDaAssinatura ? "openai" : corpo.provider,
         modelId: corpo.model_id,
-        doCatalogo: modelo?.supports_vision ?? null,
+        doCatalogo:
+          corpo.provider === PROVEDOR_POR_ASSINATURA
+            ? modeloDaAssinatura?.supports_vision ?? null
+            : modelo?.supports_vision ?? null,
       }),
-      conhecido: modelo !== null,
+      conhecido: modeloConhecido,
     },
   });
   if (!validacao.ok) {
@@ -510,6 +550,11 @@ export async function PATCH(req: NextRequest): Promise<Response> {
     .eq("model_id", corpo.default_model)
     .maybeSingle();
 
+  const modeloDaAssinatura =
+    corpo.provider === PROVEDOR_POR_ASSINATURA
+      ? (await listarModelosDaAssinaturaOuVazio(org.orgId)).find((m) => m.model_id === corpo.default_model) ?? null
+      : null;
+
   // MAS A CONFERÊNCIA SÓ VALE SE HOUVER CATÁLOGO PARA CONFERIR. `ai_models` é
   // populada pela sincronização do catálogo; numa instalação recém-feita, ou
   // numa que não roda scheduler, ela está VAZIA para o provedor escolhido — e o
@@ -526,19 +571,23 @@ export async function PATCH(req: NextRequest): Promise<Response> {
   // instalação não tem como fazer, e travar a tela que existe justamente para
   // configurar isso.
   let avisos: string[] = [];
-  if (!modelo) {
-    const { data: algumDoProvedor } = await db
-      .from("ai_models")
-      .select("model_id")
-      .eq("provider", corpo.provider)
-      .limit(1)
-      .maybeSingle();
-    if (algumDoProvedor) {
-      return fail(
-        "modelo_desconhecido",
-        t(`"${corpo.default_model}" não está no catálogo de ${corpo.provider}`),
-        404,
-      );
+  const modeloConhecido =
+    corpo.provider === PROVEDOR_POR_ASSINATURA ? modeloDaAssinatura !== null : modelo !== null;
+  if (!modeloConhecido) {
+    if (corpo.provider !== PROVEDOR_POR_ASSINATURA) {
+      const { data: algumDoProvedor } = await db
+        .from("ai_models")
+        .select("model_id")
+        .eq("provider", corpo.provider)
+        .limit(1)
+        .maybeSingle();
+      if (algumDoProvedor) {
+        return fail(
+          "modelo_desconhecido",
+          t(`"${corpo.default_model}" não está no catálogo de ${corpo.provider}`),
+          404,
+        );
+      }
     }
     avisos = [
       t(

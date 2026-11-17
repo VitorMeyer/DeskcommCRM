@@ -63,6 +63,10 @@ describe("costCents — cada tarifa isolada, por modelo", () => {
   // acidental de 5/25 por 25/5 daria os mesmos US$ 30 e passaria verde.
   it.each([
     // modelo,              entrada, saída, leitura de cache, gravação 5m, gravação 1h
+    // Família 5.5 (conferida em 11/10/2026): leitura de cache a 0.05× no Sonnet e no Opus.
+    ["claude-haiku-5-5", 10, 50, 1, 12.5, 20],
+    ["claude-sonnet-5-5", 200, 1000, 10, 250, 400],
+    ["claude-opus-5-5", 400, 2000, 20, 500, 800],
     ["claude-sonnet-5", 200, 1000, 20, 250, 400],
     ["claude-sonnet-4-6", 300, 1500, 30, 375, 600],
     ["claude-haiku-4-5", 100, 500, 10, 125, 200],
@@ -78,9 +82,12 @@ describe("costCents — cada tarifa isolada, por modelo", () => {
     ["gpt-4o-mini", 15, 60, 7.5, 15, 15],
     ["gpt-4o", 250, 1000, 125, 250, 250],
     ["gpt-4o-2024-05-13", 500, 1500, 500, 500, 500],
-    // Linha 6 (conferida em 11/10/2026): leitura de cache a 0.05× só no gpt-6.1-sol.
+    // Linha 6 (conferida em 11/10/2026; Terra em 27/10/2026): leitura de cache a
+    // 0.05× só no gpt-6.1-sol e no gpt-6.1-terra.
     ["gpt-6-astra", 1000, 5000, 100, 1250, 1250],
     ["gpt-6.1-sol", 200, 1000, 10, 250, 250],
+    // Terra: helpers usam 1M de entrada (>272k), logo entrada/cache estão na faixa longa.
+    ["gpt-6.1-terra", 200, 500, 10, 250, 250],
     ["gpt-6-luna", 10, 50, 1, 12.5, 12.5],
     ["gpt-5.6-terra", 200, 1200, 20, 250, 250],
     ["gpt-5.6-sol", 400, 2000, 40, 500, 500],
@@ -149,6 +156,46 @@ describe("Gemini 3.6/3.7/3.8 Flash — a promo acaba em 2027-01-01T00:00:00Z", (
   });
 });
 
+describe("Gemini 4 Argon — a promo acaba em 2026-12-01T00:00:00Z", () => {
+  // Página ai.google.dev/gemini-api/docs/pricing, lida em 2026-10-19 (Standard):
+  // até 30/11/2026 entrada 2 / saída 10 / cache 0,10; a partir de 01/12/2026,
+  // 4 / 20 / 0,20. Leitura de cache = 0,05× a entrada ("95% off").
+  const ANTES_DA_VIRADA_ARGON = new Date("2026-11-30T23:59:59.999Z");
+  const VIRADA_ARGON = new Date("2026-12-01T00:00:00.000Z");
+
+  it("cobra a promo no instante anterior à virada", () => {
+    expect(entrada("gemini-4-argon", ANTES_DA_VIRADA_ARGON)).toBeCloseTo(200, 6);
+    expect(saida("gemini-4-argon", ANTES_DA_VIRADA_ARGON)).toBeCloseTo(1000, 6);
+    expect(leituraDeCache("gemini-4-argon", ANTES_DA_VIRADA_ARGON)).toBeCloseTo(10, 6);
+    expect(gravacaoDeCache("gemini-4-argon", "5m", ANTES_DA_VIRADA_ARGON)).toBeCloseTo(200, 6);
+    expect(gravacaoDeCache("gemini-4-argon", "1h", ANTES_DA_VIRADA_ARGON)).toBeCloseTo(200, 6);
+  });
+
+  it("cobra 4/20/0,20 a partir de 2026-12-01T00:00:00Z", () => {
+    expect(entrada("gemini-4-argon", VIRADA_ARGON)).toBeCloseTo(400, 6);
+    expect(saida("gemini-4-argon", VIRADA_ARGON)).toBeCloseTo(2000, 6);
+    expect(leituraDeCache("gemini-4-argon", VIRADA_ARGON)).toBeCloseTo(20, 6);
+    expect(gravacaoDeCache("gemini-4-argon", "5m", VIRADA_ARGON)).toBeCloseTo(400, 6);
+    expect(gravacaoDeCache("gemini-4-argon", "1h", VIRADA_ARGON)).toBeCloseTo(400, 6);
+  });
+
+  it("o prefixo google/ e o sufixo de data acompanham a virada", () => {
+    expect(entrada("google/gemini-4-argon", ANTES_DA_VIRADA_ARGON)).toBeCloseTo(200, 6);
+    expect(saida("google/gemini-4-argon", VIRADA_ARGON)).toBeCloseTo(2000, 6);
+    expect(entrada("gemini-4-argon-20261201", VIRADA_ARGON)).toBeCloseTo(400, 6);
+  });
+
+  it("cada promo tem o seu corte: a do Argon não mexe na dos Flash", () => {
+    expect(entrada("gemini-3.8-flash", VIRADA_ARGON)).toBeCloseTo(75, 6);
+    expect(entrada("gemini-4-argon", ANTES_DA_VIRADA)).toBeCloseTo(400, 6);
+  });
+
+  it("um id que só começa igual não herda o preço do Argon", () => {
+    expect(precoDoModelo("gemini-4")).toBeUndefined();
+    expect(precoDoModelo("gemini-4-argon-pro")).toBeUndefined();
+  });
+});
+
 describe("costCents — o TTL do cache é o que o knob LLM_CACHE_TTL diz", () => {
   it("gravação em 5m custa 1,25× a entrada, não 2×", () => {
     // O defeito: a tabela só tinha a tarifa de 1h e o cálculo a aplicava sempre.
@@ -174,6 +221,12 @@ describe("costCents — id que a tabela não conhece volta NULL", () => {
     ["claude-sonnet-50"],
     ["claude-opus-4-9"],
     ["claude-opus-48"],
+    // Vizinhos da família 5.5: nenhum herda o preço do Haiku 5.5 (20× mais barato
+    // que o Opus 5), nem o Haiku 5.5 o de outro.
+    ["claude-haiku-5"],
+    ["claude-haiku-5-50"],
+    ["claude-haiku-5-5-1"],
+    ["claude-haiku-55"],
     // Vizinhos da linha 6: o gpt-6-sol ficou fora do catálogo (o 6.1 o sucede) e
     // não herda o preço de ninguém; nem o gpt-6-luna empresta o seu a um id parecido.
     ["gpt-6-sol"],
@@ -204,6 +257,7 @@ describe("costCents — id com prefixo provider/ (formato OpenRouter)", () => {
     ["anthropic/claude-sonnet-4-6", 300, 1500, 30, 375, 600],
     ["anthropic/claude-haiku-4-5", 100, 500, 10, 125, 200],
     ["anthropic/claude-opus-5", 500, 2500, 50, 625, 1000],
+    ["anthropic/claude-haiku-5-5", 10, 50, 1, 12.5, 20],
     ["openai/gpt-6-luna", 10, 50, 1, 12.5, 12.5],
     ["google/gemini-3.5-flash-lite", 30, 250, 3, 30, 30],
   ])("%s custa como o id sem prefixo", (model, cIn, cOut, cLeitura, cGrav5m, cGrav1h) => {
@@ -235,6 +289,48 @@ describe("costCents — id com prefixo provider/ (formato OpenRouter)", () => {
     expect(custo).not.toBeNull();
     expect(custo).toBeGreaterThan(22);
     expect(custo).toBeLessThan(24);
+  });
+});
+
+describe("costCents — id com PONTO no lugar do hífen (formato atual do OpenRouter)", () => {
+  // Issue #1931: o relator mediu 48 de 60 execuções de `anthropic/claude-haiku-5.5`
+  // com `cost_cents` nulo, enquanto `anthropic/claude-haiku-4-5` precificava. O
+  // recorte do prefixo (issue #1880) sozinho não bastava: a tabela indexa
+  // `claude-haiku-5-5` (hífen) e o OpenRouter publica a versão com ponto. Sem isso o
+  // custo só não ficava nulo quando o próprio OpenRouter informava `usage.cost`.
+  const USO: TokenUsage = {
+    inputTokens: 359_369,
+    outputTokens: 4_070,
+    cacheReadTokens: 294_128,
+    cacheWriteTokens: 0,
+  };
+
+  it("o id com ponto custa o MESMO que o id canônico com hífen", () => {
+    const canonico = costCents("claude-haiku-5-5", USO, "1h");
+    const comPonto = costCents("anthropic/claude-haiku-5.5", USO, "1h");
+    expect(canonico).not.toBeNull();
+    expect(comPonto).not.toBeNull();
+    expect(comPonto).toBeCloseTo(canonico as number, 10);
+  });
+
+  it.each([
+    // id com PONTO, id canônico com hífen
+    ["anthropic/claude-haiku-5.5", "claude-haiku-5-5"],
+    ["anthropic/claude-haiku-4.5", "claude-haiku-4-5"],
+    ["anthropic/claude-sonnet-5.5", "claude-sonnet-5-5"],
+    ["anthropic/claude-opus-5.5", "claude-opus-5-5"],
+  ])("%s precifica como %s em todas as tarifas", (comPonto, canonico) => {
+    expect(entrada(comPonto)).toBeCloseTo(entrada(canonico) as number, 6);
+    expect(saida(comPonto)).toBeCloseTo(saida(canonico) as number, 6);
+    expect(leituraDeCache(comPonto)).toBeCloseTo(leituraDeCache(canonico) as number, 6);
+    expect(gravacaoDeCache(comPonto, "1h")).toBeCloseTo(
+      gravacaoDeCache(canonico, "1h") as number,
+      6,
+    );
+  });
+
+  it("ponto + sufixo de data do vendor casa a linha sem data", () => {
+    expect(entrada("anthropic/claude-haiku-4.5-20251001")).toBeCloseTo(100, 6);
   });
 });
 
@@ -345,4 +441,13 @@ describe("catálogo — Gemini 3.6/3.7/3.8 Flash fica em 150/750 nas duas tabela
       expect(tela?.saida).toBe(conta?.completion);
     },
   );
+
+  it("gemini-4-argon está a 400/2000 (tarifa de 01/12/2026) no catálogo e na conta", () => {
+    const tela = ultimoPrecoDaTela("gemini-4-argon");
+    const conta = ultimoPrecoDaConta("gemini-4-argon");
+    expect(tela, "gemini-4-argon sem preço em ai_models").toEqual({ entrada: 400, saida: 2000 });
+    expect(conta?.prompt).toBe(400);
+    expect(conta?.completion).toBe(2000);
+    expect(conta?.notes.startsWith("catálogo"), `notes=${conta?.notes}`).toBe(true);
+  });
 });

@@ -6,6 +6,8 @@ import { z } from "zod";
 
 import { invalidarAppDaMeta } from "@/lib/channels/meta/app";
 import { audit } from "@/lib/audit";
+import { respostaParaOperador } from "@/lib/erros/para-operador";
+import { ipDoCliente } from "@/lib/http/ip-do-cliente";
 import { logger } from "@/lib/logger";
 import { escritaDeAdminOuRecusa } from "@/lib/auth/escritaDeAdminOuRecusa";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -110,7 +112,13 @@ async function gravar(
     // tela diria "salvo" e nada seria gravado. É o modo de falha que a issue #144
     // mediu em `organizations`, e a defesa é não escrever a query que o permite.
     .upsert({ id: 1, ...valores }, { onConflict: "id" });
-  if (error) return { ok: false, error: error.message };
+  // #3747: mesma régua da irmã `updateGoogleOAuth` — a tela recebe a frase do
+  // operador e o cru fica no log.
+  if (error) {
+    return respostaParaOperador(error, {
+      contexto: "[meta.app] falha ao gravar o app da instalação",
+    });
+  }
 
   // No MESMO processo que renderiza (na VPS há um processo de app só), então a
   // credencial nova vale na próxima entrega sem esperar o TTL de 30s.
@@ -130,7 +138,7 @@ async function gravar(
     // trilha ficaria sem a linha — sem sintoma em tela nenhuma.
     resourceId: null,
     requestId: cabecalhos.get("x-request-id") ?? undefined,
-    ip: cabecalhos.get("x-forwarded-for") ?? undefined,
+    ip: ipDoCliente(cabecalhos) ?? undefined,
     userAgent: cabecalhos.get("user-agent") ?? undefined,
     actingAsPlatformAdmin: true,
     // O QUE mudou, jamais o valor — nem o verify token recém-gerado.

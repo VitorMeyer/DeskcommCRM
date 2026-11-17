@@ -71,7 +71,7 @@
  *     python3 -c "import re;y=open('$f').read();print('roda:','agenda-conectar-google.spec.ts' in {s for _,c in re.findall(r'(SPECS_PARTE_\d+):\s*>-\n((?:[ ]{8,}.*\n)+)',y) for s in re.findall(r'[a-z0-9-]+\.spec\.ts',c)})"
  *
  */
-import { expect, test, type Page } from "./helpers/test";
+import { esperarARevelacaoNasCargas, expect, test, type Page } from "./helpers/test";
 
 import { lerCreds, loginComoAdmin } from "./helpers/login-admin";
 
@@ -99,6 +99,7 @@ test.describe("conectar a agenda do Google", () => {
   test.beforeAll(async ({ browser }) => {
     test.setTimeout(240_000);
     page = await browser.newPage();
+    esperarARevelacaoNasCargas(page);
     await loginComoAdmin(page, lerCreds());
   });
 
@@ -117,7 +118,7 @@ test.describe("conectar a agenda do Google", () => {
     // "Sua agenda está livre esta semana" é um segundo heading, e os dois
     // coexistem desde que o vazio deixou de esconder a grade. Sem `exact`, dois
     // elementos → strict mode → vermelho. A spec irmã já tinha pago isto.
-    await expect(page.getByRole("heading", { name: "Agenda", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Agendamentos", exact: true })).toBeVisible();
 
     // 2. O BOTÃO NÃO APARECE — e não é "aparece desabilitado". Desabilitado
     //    diria "você não pode"; o certo é "esta instalação ainda não tem".

@@ -3,13 +3,20 @@
 O CRM guarda tudo num projeto Supabase (Postgres gerenciado). O plano **grátis** serve para
 começar; o instalador precisa de quatro coisas dele — ou de um token que faz as quatro sozinho.
 
+**A região do projeto é a mais próxima da VPS onde o CRM roda**, não a mais próxima do cliente:
+cada tela, cada mensagem e cada turno do agente fazem várias consultas ao banco, e a distância
+entre app e banco entra em cada ida e volta. VPS no Brasil → São Paulo; nos EUA ou na Europa →
+`us-east-1`, `eu-central-1`. **A região não se troca depois de criado o projeto**: mudar exige
+criar outro e migrar os dados.
+
 ## Caminho 1 (recomendado): o token de acesso
 
 1. A pessoa cria a conta em supabase.com (login com GitHub ou e-mail).
 2. Em supabase.com/dashboard/account/tokens → *Generate new token* → dá um nome → copia.
 3. Na VPS: `export SUPABASE_ACCESS_TOKEN=sbp_...` e `bash hostgator-setup-kit/install.sh`.
 
-O instalador cria o projeto (região `sa-east-1`, São Paulo), espera o banco ficar saudável (projeto
+O instalador cria o projeto na região **mais próxima da VPS** — `sa-east-1` (São Paulo) é o padrão,
+e `SUPABASE_REGION=us-east-1` escolhe outra; espera o banco ficar saudável (projeto
 novo não nasce pronto), pega as chaves, **descobre a connection string testando conexão de
 verdade**, e configura Site URL e Redirect URLs — o que faz "esqueci minha senha", confirmação de
 cadastro e aceite de convite chegarem com o link certo.
@@ -20,8 +27,8 @@ O token **é uma chave mestra da conta** (cria e apaga projetos). Ele não é gr
 
 ## Caminho 2: criar o projeto à mão e copiar quatro campos
 
-1. supabase.com → *New project* → nome, senha do banco (**guarde**), região South America (São
-   Paulo).
+1. supabase.com → *New project* → nome, senha do banco (**guarde**), região **mais próxima da VPS**
+   (ver acima: VPS no Brasil → `sa-east-1`; nos EUA ou na Europa → `us-east-1`, `eu-central-1`).
 2. *Settings › API*: **Project URL**, **anon key**, **service_role key** (secreta — nunca no chat).
 3. *Settings › Database › Connection string*: escolha **Session pooler**, modo **URI**, e troque
    `[YOUR-PASSWORD]` pela senha do passo 1.
@@ -46,8 +53,18 @@ não conecta de uma VPS IPv4 — o instalador reconhece e recusa. O pooler tem h
 - Projeto grátis parado por muito tempo pode ser **pausado** pela Supabase; o CRM em uso não para.
 - Cota de saída de rede: o worker do CRM é econômico por padrão; um pico vem de mídia, não de
   consultas.
+- Cota de **leitura e escrita em disco** (Disk IO): a máquina do plano grátis é a menor, e uma
+  importação grande (histórico de WhatsApp, milhares de contatos) pode esgotar a cota. O painel
+  avisa "Your project is about to deplete its Disk IO Budget"; esgotada, o banco fica lento a ponto
+  de o worker registrar `ECHECKOUTTIMEOUT` e `Query read timeout`, e o CRM para de responder. A cota
+  se recarrega com o uso baixo — parar worker e scheduler acelera. Uso real pede máquina maior
+  (plano pago) ou o single-server (`supabase-local.md`).
 
 ## Supabase próprio (instalado pela pessoa, com Docker)
+
+O kit já instala um Supabase no mesmo servidor do CRM, sem a pessoa montar nada: é o modo
+single-server, em `supabase-local.md`. O que segue vale para um Supabase que a pessoa instalou por
+conta própria, fora do kit.
 
 Funciona: o CRM só precisa da URL da API, das duas chaves e de uma connection string que aceite
 conexão da VPS. Aponte `SUPABASE_DB_URL` para o pooler ou para o Postgres da sua pilha; o instalador

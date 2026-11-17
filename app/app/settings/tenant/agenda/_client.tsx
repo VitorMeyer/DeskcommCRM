@@ -1,13 +1,16 @@
 "use client";
+import { TituloDaAgenda } from "@/components/agenda/TituloDaAgenda";
 import { AgendasConectadas } from "@/components/agenda/AgendasConectadas";
 import { PrazosDePresenca } from "@/components/agenda/PrazosDePresenca";
 import { AgendaDosColegas } from "@/components/agenda/AgendaDosColegas";
 import { MeetComAcessoAberto } from "@/components/agenda/MeetComAcessoAberto";
 import { ClientePelaAgenda } from "@/components/agenda/ClientePelaAgenda";
 import { DiasBloqueados } from "@/components/agenda/DiasBloqueados";
+import { ConfiguracaoDoServico } from "@/components/agenda/ConfiguracaoDoServico";
 
+import { useMoedaDaOrgAtiva } from "@/hooks/auth/AuthProvider";
 import { useT } from "@/hooks/i18n/useT";
-import { parseReaisToCents } from "@/lib/money";
+import { MOEDA_PADRAO, parseReaisToCents } from "@/lib/money";
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
@@ -29,6 +32,9 @@ import {
 import { apiClient } from "@/lib/api/client";
 
 export interface TipoRow {
+  service_enabled?: boolean;
+  booking_mode?: string;
+  service_capacity?: number | null;
   id: string;
   name: string;
   slug: string;
@@ -41,7 +47,11 @@ export interface TipoRow {
   requires_confirmation: boolean;
   is_active: boolean;
   reminder_enabled: boolean;
+  /** Bloco do negócio na descrição do evento do Google (migration 9209). Desligado de fábrica. */
+  levar_dados_do_negocio?: boolean;
   reminder_channel_session_id?: string | null;
+  /** Modelo aprovado para quando a janela de 24 h do cliente fechou (migration 9092). */
+  reminder_meta_template_id?: string | null;
   reminder_minutes_before: number;
   reminder_extra_offsets_minutes: number[] | null;
   reminder_body: string | null;
@@ -120,14 +130,28 @@ export interface CanalParaLembrete {
   nome: string;
 }
 
+/**
+ * Um modelo aprovado que o lembrete consegue mandar — a página só passa os que
+ * `modeloServeAoLembrete` aceita, com o número dono no rótulo: o modelo só sai
+ * por ele (`lib/agenda/lembrete-por-modelo.ts`).
+ */
+export interface ModeloParaLembrete {
+  id: string;
+  nome: string;
+}
+
 function LembreteDoCompromisso({
   tipo,
   canais,
   erroCanais,
+  modelos,
+  erroModelos,
 }: {
   tipo: TipoRow;
   canais: CanalParaLembrete[];
   erroCanais: string | null;
+  modelos: ModeloParaLembrete[];
+  erroModelos: string | null;
 }) {
   const t = useT();
   const [ligado, setLigado] = React.useState(tipo.reminder_enabled);
@@ -199,7 +223,7 @@ function LembreteDoCompromisso({
           disabled={!ligado || Boolean(erroCanais)}
           defaultValue={tipo.reminder_channel_session_id ?? ""}
           data-testid={`editar-lembrete-canal-${tipo.id}`}
-          className="rounded-md border border-border bg-surface p-2 text-sm text-text disabled:opacity-50"
+          className="w-full min-w-0 rounded-md border border-border bg-surface p-2 text-sm text-text disabled:opacity-50 max-md:min-h-11"
         >
           <option value="">
             {t("Automático — conversa da reserva ou único canal disponível")}
@@ -225,6 +249,56 @@ function LembreteDoCompromisso({
           <span role="alert">
             {t(
               "Não foi possível carregar os canais. A escolha guardada será preservada; tente novamente.",
+            )}
+          </span>
+        ) : null}
+      </label>
+      {/*
+        O MODELO PARA FORA DA JANELA. No número oficial, texto livre só chega a
+        quem escreveu nas últimas 24 h, e a reserva feita dias antes cai fora: sem
+        modelo, o cron pula o lembrete e avisa a equipe (#2595). Com ele, o
+        lembrete sai pelo modelo. Mesmo desenho do canal acima: desabilitado não
+        entra no FormData, então falha de leitura preserva a escolha guardada.
+      */}
+      <label className="grid gap-1 text-xs text-text-muted">
+        {t("Se a janela de 24 h do cliente já tiver fechado, mandar este modelo aprovado")}
+        <select
+          name="reminder_meta_template_id"
+          disabled={!ligado || Boolean(erroModelos)}
+          defaultValue={tipo.reminder_meta_template_id ?? ""}
+          data-testid={`editar-lembrete-modelo-${tipo.id}`}
+          className="w-full min-w-0 rounded-md border border-border bg-surface p-2 text-sm text-text disabled:opacity-50 max-md:min-h-11"
+        >
+          <option value="">
+            {t("Nenhum — fora da janela o lembrete não sai e a equipe recebe um aviso")}
+          </option>
+          {tipo.reminder_meta_template_id &&
+          !modelos.some((m) => m.id === tipo.reminder_meta_template_id) ? (
+            <option value={tipo.reminder_meta_template_id}>
+              {t("Modelo configurado indisponível — escolha outro")}
+            </option>
+          ) : null}
+          {modelos.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.nome}
+            </option>
+          ))}
+        </select>
+        <span>
+          {t(
+            "Vale só para o número oficial, que depois de 24 horas sem mensagem do cliente aceita apenas modelo aprovado. O modelo sai pelo número dono dele, e as variáveis recebem, nesta ordem: {{1}} primeiro nome, {{2}} dia e hora, {{3}} título, {{4}} endereço.",
+          )}
+        </span>
+        {erroModelos ? (
+          <span role="alert">
+            {t(
+              "Não foi possível carregar os modelos aprovados. A escolha guardada será preservada; tente novamente.",
+            )}
+          </span>
+        ) : modelos.length === 0 ? (
+          <span>
+            {t(
+              "Nenhum modelo aprovado no WhatsApp ainda. Crie um em Conexões → Modelos e ele aparece aqui quando for aprovado.",
             )}
           </span>
         ) : null}
@@ -353,6 +427,9 @@ export function TiposDeAgendamentoClient({
   tiposIniciais,
   canais = [],
   erroCanais = null,
+  modelos = [],
+  erroModelos = null,
+  tituloDaAgenda = null,
   pessoas,
   podeEditar,
   usuarioAtualId,
@@ -368,6 +445,10 @@ export function TiposDeAgendamentoClient({
   tiposIniciais: TipoRow[];
   canais?: CanalParaLembrete[];
   erroCanais?: string | null;
+  /** Modelos aprovados que o lembrete consegue mandar fora da janela de 24 h. */
+  modelos?: ModeloParaLembrete[];
+  erroModelos?: string | null;
+  tituloDaAgenda?: string | null;
   pessoas: Array<{ id: string; papel: string; nome: string }>;
   podeEditar: boolean;
   usuarioAtualId: string;
@@ -386,7 +467,13 @@ export function TiposDeAgendamentoClient({
 }) {
   const t = useT();
   const router = useRouter();
+  // A moeda da organização é a régua do preço padrão digitado aqui (#3367).
+  // O leitor de sessão devolve a MESMA coluna que `moedaDaOrganizacao` lê no
+  // servidor (`organizations.currency`), e cai no padrão fora do provider —
+  // mesma degradação das outras telas de dinheiro.
+  const moeda = useMoedaDaOrgAtiva() ?? MOEDA_PADRAO;
   const [criando, setCriando] = React.useState(false);
+  const [serviceDraft, setServiceDraft] = React.useState(false);
   /**
    * O RASCUNHO NASCE COM QUEM ESTÁ CRIANDO.
    *
@@ -411,6 +498,7 @@ export function TiposDeAgendamentoClient({
   }));
   const [salvando, setSalvando] = React.useState(false);
   const [editandoId, setEditandoId] = React.useState<string | null>(null);
+  const [servicoId, setServicoId] = React.useState<string | null>(null);
 
   async function comErro(acao: () => Promise<unknown>, mensagem: string) {
     setSalvando(true);
@@ -430,30 +518,7 @@ export function TiposDeAgendamentoClient({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4" data-testid="tipos-de-agendamento-config">
-      {podeConfigurarGoogle && <AgendasConectadas />}
-      <PrazosDePresenca podeEditar={podeEditar} />
-      <ClientePelaAgenda
-        ligadoInicial={clientePelaAgendaLigado}
-        podeLigar={podeLigarClientePelaAgenda}
-      />
-      {/* A opção da issue #978 fica ao lado das outras regras de comportamento
-          da agenda: é a mesma pergunta ("como a agenda se comporta nesta
-          empresa?"), e separá-la noutra tela esconderia de quem configura que
-          ela existe. */}
-      <AgendaDosColegas
-        ligadoInicial={colegasPodemMexerNaAgendaLigado}
-        podeMudar={podeMudarAgendaDosColegas}
-      />
-      {/* A opção da issue #2063 é a mesma pergunta ("como a agenda se
-          comporta nesta empresa?"), e o AVISO DE RISCO fica encostado nela de
-          propósito: é a única troca de segurança por conveniência que esta
-          tela faz, e ler a frase antes de apertar é melhor que confirmar
-          depois. */}
-      <MeetComAcessoAberto
-        ligadoInicial={meetAbertoLigado}
-        podeMudar={podeMudarMeetAberto}
-      />
-      <DiasBloqueados podeEditar={podeEditar} />
+      {podeEditar && servicoId && <ConfiguracaoDoServico key={servicoId} typeId={servicoId} name={tiposIniciais.find((x) => x.id === servicoId)?.name ?? ""} pessoas={pessoas} onClose={() => setServicoId(null)} onEditType={() => { setEditandoId(servicoId); setServicoId(null); }}/>}
       {podeEditar ? (
         <div>
           {criando ? (
@@ -469,6 +534,7 @@ export function TiposDeAgendamentoClient({
                       category: rascunho.category,
                       duration_minutes: Number(rascunho.duration_minutes),
                       location_kind: rascunho.location_kind,
+                      ...(serviceDraft ? { service_draft: true } : {}),
                       ...(rascunho.default_owner_user_id
                         ? { default_owner_user_id: rascunho.default_owner_user_id }
                         : {}),
@@ -559,6 +625,8 @@ export function TiposDeAgendamentoClient({
                   ))}
                 </select>
               </label>
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={serviceDraft} onChange={(e) => setServiceDraft(e.target.checked)}/>{t("Criar como serviço em rascunho")}</label>
+              {serviceDraft && <p className="text-sm text-text-muted">{t("Depois de criar, abra Serviço e horários para configurar e ativar. Nenhuma reserva é oferecida antes da ativação.")}</p>}
               <div className="flex justify-end gap-2 sm:col-span-2">
                 <Button type="button" variant="ghost" size="sm" onClick={() => setCriando(false)}>
                   {t("Cancelar")}
@@ -624,13 +692,10 @@ export function TiposDeAgendamentoClient({
               <span className="rounded-full border border-border px-2 py-0.5 text-[11px] text-text-muted">
                 {t(rotuloDe(CATEGORIAS, tipo.category))}
               </span>
-              <span className="text-xs text-text-muted tabular-nums">
-                {tipo.duration_minutes} min
-              </span>
-              <span className="text-xs text-text-muted">
-                {t(rotuloDe(LOCAIS, tipo.location_kind))}
-              </span>
-              {!tipo.default_owner_user_id ? (
+              <span className="text-xs tabular-nums text-text-muted">{tipo.duration_minutes} min</span>
+              <span className="text-xs text-text-muted">{t(rotuloDe(LOCAIS, tipo.location_kind))}</span>
+              {tipo.service_enabled && <span className="text-xs text-text-muted">{tipo.booking_mode === "collective_limited" ? `${t("Coletivo com capacidade")} · ${tipo.service_capacity}` : tipo.booking_mode === "collective_unlimited" ? t("Coletivo sem limite automático") : t("Individual por profissional")}</span>}
+              {!tipo.default_owner_user_id && !tipo.service_enabled ? (
                 // O aviso existe porque o sintoma é MUDO: sem dono, a tela de
                 // marcar simplesmente não mostra horário, sem dizer por quê.
                 //
@@ -676,11 +741,10 @@ export function TiposDeAgendamentoClient({
                     : ""}
                 </span>
               ) : null}
-              {!tipo.is_active ? (
-                <span className="text-xs text-text-subtle">{t("desativado")}</span>
-              ) : null}
+              {!tipo.is_active ? <span className="text-xs text-text-subtle">{tipo.service_enabled ? t("Rascunho: novas reservas estão desativadas.") : t("desativado")}</span> : null}
               {podeEditar ? (
-                <span className="ml-auto flex gap-1">
+                <span className="ml-auto flex flex-wrap gap-1">
+                  {(tipo.is_active || !tipo.service_enabled) && <Button variant="outline" size="sm" className="h-auto min-h-11 whitespace-normal text-left" onClick={() => { setServicoId(servicoId === tipo.id ? null : tipo.id); window.scrollTo({ top: 0, behavior: "smooth" }); }}>{t("Configurar")} {tipo.name}</Button>}
                   <Button
                     variant="ghost"
                     size="sm"
@@ -704,6 +768,8 @@ export function TiposDeAgendamentoClient({
                     >
                       Desativar
                     </Button>
+                  ) : tipo.service_enabled ? (
+                    <Button variant="outline" size="sm" className="h-auto min-h-11 whitespace-normal text-left" onClick={() => { setServicoId(tipo.id); window.scrollTo({ top: 0, behavior: "smooth" }); }}>{t("Configurar")} {tipo.name}</Button>
                   ) : (
                     <Button
                       variant="ghost"
@@ -771,10 +837,14 @@ export function TiposDeAgendamentoClient({
                         default_price_cents: (() => {
                           const bruto = String(dados.get("default_price_cents") ?? "").trim();
                           if (bruto === "") return null;
-                          const cents = parseReaisToCents(bruto);
+                          // Lido pela régua da moeda da organização (#3367): em
+                          // dólar `1,300` é mil e trezentos, e o preço sugerido
+                          // que a comanda recebe nasce no mesmo centavo.
+                          const cents = parseReaisToCents(bruto, moeda);
                           return cents === null ? null : cents;
                         })(),
                         reminder_enabled: dados.get("reminder_enabled") === "on",
+                        levar_dados_do_negocio: dados.get("levar_dados_do_negocio") === "on",
                         // O campo desabilitado também não aparece, e omitir é o
                         // certo: desligar o aviso não pode apagar a lista que
                         // alguém escolheu (ver `LembreteDoCompromisso`).
@@ -788,6 +858,13 @@ export function TiposDeAgendamentoClient({
                                   ? {
                                       reminder_channel_session_id:
                                         String(dados.get("reminder_channel_session_id") || "") ||
+                                        null,
+                                    }
+                                  : {}),
+                                ...(dados.has("reminder_meta_template_id")
+                                  ? {
+                                      reminder_meta_template_id:
+                                        String(dados.get("reminder_meta_template_id") || "") ||
                                         null,
                                     }
                                   : {}),
@@ -862,7 +939,30 @@ export function TiposDeAgendamentoClient({
                     </span>
                   </label>
                 </div>
-                <LembreteDoCompromisso tipo={tipo} canais={canais} erroCanais={erroCanais} />
+                {/* Doc 272 = B: desligado de fábrica. No Google todo convidado lê
+                    a descrição — inclusive o cliente com e-mail na ficha. */}
+                <label className="flex items-start gap-2 border-t border-border pt-3 text-xs text-text-muted">
+                  <input
+                    type="checkbox"
+                    name="levar_dados_do_negocio"
+                    defaultChecked={tipo.levar_dados_do_negocio === true}
+                    data-testid={`editar-levar-negocio-${tipo.id}`}
+                    className="mt-0.5 size-4 shrink-0 rounded-sm border-border accent-accent"
+                  />
+                  <span className="grid gap-0.5">
+                    <span>{t("Levar os dados do negócio para o Google")}</span>
+                    <span className="text-[11px]">
+                      {t("Negócio, etapa, produtos, cliente e telefone entram na descrição do evento. Todo convidado lê, inclusive o cliente.")}
+                    </span>
+                  </span>
+                </label>
+                <LembreteDoCompromisso
+                  tipo={tipo}
+                  canais={canais}
+                  erroCanais={erroCanais}
+                  modelos={modelos}
+                  erroModelos={erroModelos}
+                />
                 <div className="flex justify-end">
                   <Button
                     type="submit"
@@ -878,6 +978,25 @@ export function TiposDeAgendamentoClient({
           </li>
         ))}
       </ul>
+      {podeConfigurarGoogle && <details className="rounded-lg border border-border bg-surface p-4"><summary className="cursor-pointer font-semibold">{t("Contas e calendários Google")}</summary><div className="mt-4"><AgendasConectadas /></div></details>}
+      <details className="rounded-lg border border-border bg-surface p-4"><summary className="cursor-pointer font-semibold">{t("Regras gerais da agenda")}</summary><div className="mt-4 space-y-4">
+        <TituloDaAgenda tituloInicial={tituloDaAgenda} podeEditar={podeEditar}/>
+      <PrazosDePresenca podeEditar={podeEditar}/>
+      <ClientePelaAgenda
+        ligadoInicial={clientePelaAgendaLigado}
+        podeLigar={podeLigarClientePelaAgenda}
+      />
+      {/* A opção da issue #978 fica ao lado das outras regras de comportamento
+          da agenda: é a mesma pergunta ("como a agenda se comporta nesta
+          empresa?"), e separá-la noutra tela esconderia de quem configura que
+          ela existe. */}
+      <AgendaDosColegas
+        ligadoInicial={colegasPodemMexerNaAgendaLigado}
+        podeMudar={podeMudarAgendaDosColegas}
+      />
+      <MeetComAcessoAberto ligadoInicial={meetAbertoLigado} podeMudar={podeMudarMeetAberto}/>
+      <DiasBloqueados podeEditar={podeEditar}/>
+      </div></details>
     </div>
   );
 }

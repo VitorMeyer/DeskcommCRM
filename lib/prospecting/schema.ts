@@ -1,5 +1,17 @@
 import { z } from "zod";
 
+import type { SiteEnrichment } from "@/lib/prospecting/site-classify";
+import type { PreviaSalva } from "@/lib/prospecting/previa";
+import type { ContextoDaEquipe } from "@/lib/prospecting/contexto-da-equipe";
+import {
+  problemaNaMidiaDaAbordagem,
+} from "@/lib/prospecting/midia-da-abordagem";
+import {
+  problemaNoTextoDaSaida,
+  TAMANHO_MAXIMO_DO_TEXTO_DA_SAIDA,
+} from "@/lib/prospecting/rodape-de-saida";
+import { normalizarTags, TAMANHO_MAXIMO_DA_TAG } from "@/lib/contacts/tag-normalizada";
+
 /**
  * Os dois números do RITMO da campanha, com os mesmos limites no início e no
  * ajuste. Moram aqui, uma vez, porque o ajuste de uma campanha pausada
@@ -10,6 +22,90 @@ import { z } from "zod";
 const LIMITE_DIARIO = z.number().int().min(1).max(50);
 const INTERVALO_MINUTOS = z.number().int().min(5).max(1440);
 
+/**
+ * O tamanho do texto que a campanha leva para cada conversa — instrução e
+ * critérios. Fonte única: o `start` e a edição de uma campanha pausada
+ * (`edit_briefing`) recusam os mesmos valores. Um mínimo de 10 caracteres é o
+ * que impede o "ok" salvo como instrução de abordagem.
+ */
+export const TAMANHO_MINIMO_DO_BRIEFING = 10;
+export const TAMANHO_MAXIMO_DO_BRIEFING = 2000;
+
+/** O que a campanha vende, em prioridade. Default = comportamento atual. */
+export const OFERTAS_DA_CAMPANHA = ["site", "automacao_crm", "automacao_n8n"] as const;
+export const ofertasDaCampanhaSchema = z
+  .array(z.enum(OFERTAS_DA_CAMPANHA))
+  .min(1)
+  .max(3)
+  .default(["site"]);
+
+/**
+ * O que se edita numa campanha já iniciada e pausada: o texto e as ofertas.
+ * Mora aqui, e não dentro do schema da rota, para o servidor e a tela usarem a
+ * MESMA régua de tamanho que o `start` usa.
+ */
+export const briefingDaCampanhaSchema = z
+  .object({
+    instruction: z
+      .string()
+      .trim()
+      .min(TAMANHO_MINIMO_DO_BRIEFING)
+      .max(TAMANHO_MAXIMO_DO_BRIEFING),
+    qualification: z
+      .string()
+      .trim()
+      .min(TAMANHO_MINIMO_DO_BRIEFING)
+      .max(TAMANHO_MAXIMO_DO_BRIEFING),
+    // Sem `.default()`: numa EDIÇÃO, oferta omitida não pode voltar silenciosamente
+    // para "site" e trocar o que a campanha vende sem ninguém pedir.
+    ofertas: z.array(z.enum(OFERTAS_DA_CAMPANHA)).min(1).max(3),
+  })
+  .strict();
+export type OfertaDaCampanha = (typeof OFERTAS_DA_CAMPANHA)[number];
+
+/**
+ * Rótulos de tela de cada oferta. Fonte única: a tela da campanha (com `t()`), o
+ * contexto que o agente lê em cada turno e a ferramenta de auditoria usam estes
+ * mesmos textos, para os três lugares não divergirem.
+ */
+export const ROTULOS_DAS_OFERTAS = {
+  site: "Site profissional",
+  automacao_crm: "Automação do atendimento (CRM)",
+  automacao_n8n: "Automações e integrações (N8N)",
+} as const satisfies Record<OfertaDaCampanha, string>;
+
+/**
+ * Etiquetas que a campanha põe no CONTATO antes da primeira mensagem (spec 27). Até 5, na
+ * mesma forma que o CRM guarda (`normalizarTags`). Sem `.default()`: configuração gravada
+ * antes desta chave existir continua SEM a chave, e a comparação de `activateCampaign`
+ * segue igual para ela. Lista vazia (ou só de espaços) = nenhuma etiqueta.
+ */
+export const CONTACT_TAGS_MAXIMO = 5;
+const contactTagsSchema = z
+  .array(z.string().max(TAMANHO_MAXIMO_DA_TAG))
+  .max(CONTACT_TAGS_MAXIMO)
+  .transform((tags) => normalizarTags(tags));
+
+/**
+ * Por que o texto do campo de etiquetas não pode ser gravado; `null` quando pode. Existe para a
+ * tela AVISAR em vez de cortar: `normalizarTags` corta em 40 caracteres, e a etiqueta cortada
+ * nunca casaria com a da skill; a sexta, se a tela a descartasse, sumiria sem ninguém saber.
+ */
+export function problemaNasEtiquetas(texto: string): "demais" | "longa" | null {
+  const partes = texto.split(",").map((parte) => parte.trim());
+  if (partes.some((parte) => parte.length > TAMANHO_MAXIMO_DA_TAG)) return "longa";
+  return normalizarTags(partes).length > CONTACT_TAGS_MAXIMO ? "demais" : null;
+}
+
+/**
+ * As etiquetas que o nicho da busca sugere, ou nenhuma quando ele não cabe. O nicho aceita 120
+ * caracteres e a etiqueta 40: cortar geraria uma etiqueta que nunca casa com a skill, e devolver
+ * lista inválida prenderia o Iniciar por um texto que o operador não digitou.
+ */
+export function etiquetasDoNicho(nicho: string): string[] {
+  return problemaNasEtiquetas(nicho) === null ? normalizarTags(nicho.split(",")) : [];
+}
+
 export const campaignConfigSchema = z
   .object({
     agent_id: z.string().uuid(),
@@ -17,8 +113,17 @@ export const campaignConfigSchema = z
     pipeline_id: z.string().uuid(),
     stage_id: z.string().uuid(),
     qualified_stage_id: z.string().uuid(),
-    instruction: z.string().trim().min(10).max(2000),
-    qualification: z.string().trim().min(10).max(2000),
+    instruction: z
+      .string()
+      .trim()
+      .min(TAMANHO_MINIMO_DO_BRIEFING)
+      .max(TAMANHO_MAXIMO_DO_BRIEFING),
+    qualification: z
+      .string()
+      .trim()
+      .min(TAMANHO_MINIMO_DO_BRIEFING)
+      .max(TAMANHO_MAXIMO_DO_BRIEFING),
+    ofertas: ofertasDaCampanhaSchema,
     daily_limit: LIMITE_DIARIO.default(10),
     interval_minutes: INTERVALO_MINUTOS.default(15),
     legal_basis_ref: z.string().trim().min(3).max(500),
@@ -27,6 +132,74 @@ export const campaignConfigSchema = z
     // vez de ser abordada. O padrão é `on_start` — configuração gravada antes desta chave
     // existir segue funcionando igual, sem ninguém editar nada.
     funnel_entry: z.enum(["on_start", "on_send"]).default("on_start"),
+    // QUANDO a saída ("responda PARAR") é oferecida — depende da estratégia de abordagem.
+    // `first_message`: na abertura (o padrão, o de sempre). `second_message`: a abertura
+    // não faz oferta e a saída vai na mensagem seguinte. Não há modo da 3ª (doc 170): só
+    // UMA mensagem sem saída, e é a única que a instrução ao modelo segura sem trava. Em
+    // TODOS os modos a palavra continua bloqueando (lib/channels/pos-entrada.ts).
+    // O padrão é `first_message`: configuração gravada antes desta chave existir segue
+    // igual, sem ninguém editar nada.
+    exit_offer: z.enum(["first_message", "second_message"]).default("first_message"),
+    // TEXTO PRÓPRIO DA SAÍDA (#4370) — opcional, escrito pelo DONO da campanha e
+    // nunca pelo modelo: a mesma redação sai em todos os envios e é auditável.
+    // Vazio/ausente = a frase padrão de `rodape-de-saida.ts`, byte por byte.
+    //
+    // Aqui ficam as regras que NÃO dependem do idioma da instalação (o locale
+    // mora em `organizations`, não neste `config`): tamanho, sem link, e com
+    // alguma palavra que a saída oferece — sem ela, a pessoa responde "é só me
+    // avisar" para um detector que não reconhece isso, e continua recebendo. A
+    // exigência da palavra NO IDIOMA é feita onde o locale é conhecido:
+    // `validateConfig` (servidor) e o formulário da campanha.
+    texto_da_saida: z
+      .string()
+      .trim()
+      .max(
+        TAMANHO_MAXIMO_DO_TEXTO_DA_SAIDA,
+        `O texto da opção de parar tem até ${TAMANHO_MAXIMO_DO_TEXTO_DA_SAIDA} caracteres.`,
+      )
+      .refine((texto) => problemaNoTextoDaSaida(texto) === null, {
+        message:
+          "O texto da opção de parar precisa conter a palavra que a pessoa responde para sair (PARAR, BAJA ou STOP) e não pode ter link.",
+      })
+      .optional(),
+    // Etiquetas do contato na abordagem (spec 27). Ausente = a campanha não etiqueta ninguém.
+    contact_tags: contactTagsSchema.optional(),
+    // MARCADOR DE ARQUIVAMENTO (#4359): quando presente, a campanha saiu da lista
+    // principal SEM perder nada — nenhum negócio, conversa, candidato ou custo é
+    // apagado. Mora na `config` (jsonb) porque arquivar é estado de TELA, não um
+    // passo do funil, e não precisa de coluna nova. O schema precisa CONHECÊ-LO:
+    // o envio, a prévia e a retomada fazem `parse` estrito desta mesma
+    // configuração, e uma chave desconhecida faria a campanha arquivada ser
+    // recusada pelo próprio código que a gravou.
+    arquivada_em: z.string().datetime().optional(),
+    // A MÍDIA FIXA DA PRIMEIRA ABORDAGEM (#4581) — imagem, vídeo ou PDF que sai
+    // JUNTO da primeira mensagem, igual para todos os candidatos da campanha.
+    //
+    // É uma REFERÊNCIA a arquivo que já existe no produto (`storage_path` no
+    // bucket `whatsapp-media`, sob `{org}/`), com o mime e o tamanho que a rota
+    // de upload gravou — nada de upload novo nesta fatia, e nada escolhido pela
+    // IA. Sem `.default()`: campanha gravada antes desta chave existir continua
+    // SEM a chave, e o envio dela segue byte a byte como antes.
+    //
+    // Aqui ficam as regras que não dependem da organização: tipo (imagem, vídeo
+    // ou PDF) e tamanho do tipo. A POSSE do caminho — o arquivo tem de ser desta
+    // organização — é conferida onde a organização é conhecida (`validateConfig`).
+    midia_da_abordagem: z
+      .object({
+        storage_path: z.string().trim().min(1).max(500),
+        media_mime: z.string().trim().min(3).max(120),
+        media_size_bytes: z.number().int().positive(),
+      })
+      .strict()
+      .superRefine((midia, ctx) => {
+        const motivo = problemaNaMidiaDaAbordagem(midia);
+        if (motivo) ctx.addIssue({ code: z.ZodIssueCode.custom, message: motivo });
+      })
+      .optional(),
+    // CARIMBO DA ÚLTIMA EDIÇÃO DO TEXTO (#4570, doc 358 › 1A). Gravado só por
+    // `editBriefing`. A prévia guarda o carimbo com que nasceu e o envio só usa a
+    // que tem o carimbo atual (`previaDoAgente`). Ausente = nunca editada.
+    briefing_editado_em: z.string().datetime().optional(),
   })
   .strict();
 export const searchSchema = z
@@ -37,6 +210,10 @@ export const searchSchema = z
     limit: z.number().int().min(1).max(100).default(20),
     budget_usd: z.number().min(0.5).max(10).default(1),
     enrich: z.boolean().default(true),
+    // Preparo automático (B2) — ver `opcoes-do-preparo.ts`. Ligados por padrão NA BUSCA
+    // NOVA (que grava as duas chaves); campanha antiga, sem a chave, não gera prévia.
+    avaliar_site: z.boolean().default(true),
+    gerar_previa: z.boolean().default(true),
   })
   .strict();
 export const prospectingInputSchema = z.discriminatedUnion("action", [
@@ -80,11 +257,119 @@ export const prospectingInputSchema = z.discriminatedUnion("action", [
       selected: z.boolean(),
     })
     .strict(),
+  // Trocar as etiquetas de contato DEPOIS de iniciada, com a campanha pausada (spec 27). Só vale
+  // para os contatos criados dali em diante; quem já foi abordado não é reescrito. Mesma régua
+  // de `adjust_pace`: lista vazia é um ajuste válido (tira as etiquetas), campo a mais é 422.
+  z
+    .object({
+      action: z.literal("adjust_tags"),
+      id: z.string().uuid(),
+      contact_tags: contactTagsSchema,
+    })
+    .strict(),
   z.object({ action: z.literal("discard_unselected"), id: z.string().uuid() }).strict(),
+  // Editar a INSTRUÇÃO, os CRITÉRIOS e as OFERTAS de uma campanha já iniciada (#4570).
+  // Mesma régua de `adjust_pace`/`adjust_tags`: só com a campanha pausada — o texto
+  // entra em cada turno novo e trocá-lo no meio de uma abordagem seria trocar a régua
+  // no meio da medida. Só vale para as próximas conversas: o histórico já trocado
+  // não é reescrito. Estrito: conexão, agente, funil e base legal seguem fechados.
+  z
+    .object({
+      action: z.literal("edit_briefing"),
+      id: z.string().uuid(),
+      instruction: briefingDaCampanhaSchema.shape.instruction,
+      qualification: briefingDaCampanhaSchema.shape.qualification,
+      ofertas: briefingDaCampanhaSchema.shape.ofertas,
+    })
+    .strict(),
+  // Reanálise manual da auditoria (spec 24): reescreve `data.site` na hora.
+  // Fechada a token (fora de ACOES_ABERTAS_AO_TOKEN): exige sessão.
+  z
+    .object({
+      action: z.literal("reanalisar_site"),
+      id: z.string().uuid(),
+      candidate_ids: z.array(z.string().uuid()).min(1).max(50),
+    })
+    .strict(),
+  // Prévia da abordagem (spec 24): gera a copy SEM enviar. Somente leitura —
+  // não audita (sem mutação); o custo aparece em `llm_calls`. Fora da allowlist.
+  z
+    .object({
+      action: z.literal("prever_abordagem"),
+      id: z.string().uuid(),
+      candidate_id: z.string().uuid(),
+    })
+    .strict(),
+  // Verificação de site sob demanda (spec 24): enriquece o próximo lote da
+  // campanha AGORA, em vez de esperar o tick. Fechada a token: quem dispara
+  // gasta rede e é uma pessoa revisando a fila.
+  z.object({ action: z.literal("verificar_sites"), id: z.string().uuid() }).strict(),
+  // "Completar fichas" (spec 26 §3.3): acrescenta à ficha dos contatos JÁ EXISTENTES
+  // da campanha o link que falta (o que a pessoa digitou fica). Fechada a token:
+  // escreve no CRM, e quem decide é uma pessoa com sessão.
+  z.object({ action: z.literal("completar_fichas"), id: z.string().uuid() }).strict(),
+  // ARQUIVAR (#4359): tira a campanha que falhou ou veio zerada da lista principal,
+  // SEM apagar nada do que ela já criou. Idempotente, porque o botão pode ser
+  // clicado duas vezes. Fechada a token (fora de ACOES_ABERTAS_AO_TOKEN): esconder
+  // uma campanha é gesto de quem está lendo a lista — por token esconderia uma
+  // campanha que a pessoa nunca abriu.
+  z.object({ action: z.literal("arquivar"), id: z.string().uuid() }).strict(),
+  z.object({ action: z.literal("desarquivar"), id: z.string().uuid() }).strict(),
 ]);
 export type CampaignConfig = z.infer<typeof campaignConfigSchema>;
 export type CampaignPace = Pick<CampaignConfig, "daily_limit" | "interval_minutes">;
+/** O pedaço da configuração que se edita com a campanha iniciada e pausada (#4570). */
+export type CampaignBriefing = Pick<CampaignConfig, "instruction" | "qualification" | "ofertas">;
 export type SearchInput = z.infer<typeof searchSchema>;
+/**
+ * O que a campanha importada de planilha guarda em `prospecting_campaigns.search` (jsonb).
+ * `avaliar_site`/`gerar_previa` são as mesmas chaves da busca (`opcoesDoPreparo`); `name` e
+ * `niche` são os que o resto da esteira lê. NÃO guarda o nome do arquivo (pode conter nome
+ * de pessoa) nem linha de dado. `origem_da_lista` é o "de onde veio esta lista" da LGPD.
+ */
+export interface BuscaDaPlanilha {
+  /**
+   * Marca a campanha como IMPORTADA (#3724) — não houve busca no Maps nem engine. O nome é
+   * `importacao` e não `planilha` porque a origem que a esteira lê é o fato de a lista ter
+   * vindo de fora: o formato (csv/xlsx) é detalhe do arquivo, não da campanha.
+   */
+  origem: "importacao";
+  name: string;
+  niche: string;
+  arquivo_bytes: number;
+  linhas: number;
+  origem_da_lista: string;
+  avaliar_site: boolean;
+  gerar_previa: boolean;
+}
+const CAIXA_DO_FORMULARIO = z
+  .enum(["true", "false"])
+  .default("true")
+  .transform((v) => v === "true");
+/**
+ * Os campos de TEXTO do formulário multipart da importação (o arquivo vai à parte). Estrito:
+ * campo a mais — `organization_id` inclusive — é 422, nada daqui vira organização.
+ * `gerar_previa` só vale com `avaliar_site` (sem veredito do site não há em que ancorá-la).
+ */
+export const importarPlanilhaCamposSchema = z
+  .object({
+    request_id: z.string().uuid(),
+    name: z.string().trim().min(2).max(120),
+    niche: z.string().trim().min(2).max(120),
+    origem_da_lista: z.string().trim().min(3).max(500),
+    avaliar_site: CAIXA_DO_FORMULARIO,
+    gerar_previa: CAIXA_DO_FORMULARIO,
+    // `previa` só CONFERE: devolve o que entra e o que fica de fora (com o motivo de cada
+    // linha) e não cria campanha nenhuma. Ausente = importar, que é o que o formulário
+    // envia por padrão.
+    previa: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((v) => v === "true"),
+  })
+  .strict()
+  .transform((c) => ({ ...c, gerar_previa: c.avaliar_site && c.gerar_previa }));
+export type ImportarPlanilhaCampos = z.output<typeof importarPlanilhaCamposSchema>;
 /** Motivo gravado quando o operador desmarca uma empresa na preparação da campanha. */
 export const RAZAO_NAO_SELECIONADA = "Não selecionada pelo operador.";
 /**
@@ -94,6 +379,15 @@ export const RAZAO_NAO_SELECIONADA = "Não selecionada pelo operador.";
  */
 export function razaoDeAbordarSelecionado(selected: boolean): string | null {
   return selected ? null : RAZAO_NAO_SELECIONADA;
+}
+/**
+ * O que fica gravado em `prospecting_candidates.data.whatsapp` (`lib/prospecting/whatsapp.ts`).
+ * Mora AQUI, e não lá, de propósito: a tela importa este arquivo, e trazer o módulo da
+ * consulta para o grafo dela puxaria o seam inteiro de canais para o bundle do navegador.
+ */
+export interface VereditoWhatsapp {
+  existe: boolean;
+  verificado_em: string;
 }
 export interface Prospect {
   key: string;
@@ -107,9 +401,61 @@ export interface Prospect {
   reviews: number | null;
   emails: string[];
   socials: string[];
+  /** Veredito do enriquecimento de site (spec 24). Ausente = pendente. */
+  site?: SiteEnrichment | null;
+  /**
+   * A prévia da abordagem que a tela gerou e guardou (B1). Só vale enquanto a
+   * auditoria em que ela se apoiou continuar de pé (`previaValida`); ausente ou
+   * vencida, o envio escreve do zero.
+   */
+  previa?: PreviaSalva | null;
+  /**
+   * O telefone tem WhatsApp? Resposta do canal (`numeroTemConta`, via
+   * `lib/prospecting/whatsapp.ts`). Ausente = ainda não conferido (ou não há
+   * conexão capaz de conferir); `existe: false` tira a empresa da abordagem.
+   */
+  whatsapp?: VereditoWhatsapp | null;
+  /**
+   * O texto com que a abordagem COMEÇOU (#4570, doc 358 › 1A), gravado por
+   * `editBriefing` em quem já foi abordado quando a campanha é editada. O turno
+   * (`context.ts`) lê este antes da `config`. Ausente = a campanha não foi
+   * editada desde a abordagem, e a `config` ainda é o texto com que ela começou.
+   */
+  briefing?: Partial<CampaignBriefing> | null;
+  /**
+   * O que a EQUIPE já sabe da empresa (colunas `diagnostico`, `oferta` e `contexto` da
+   * planilha), com quem importou e quando (`lib/prospecting/contexto-da-equipe.ts`).
+   * Ausente = a lista não trouxe nada disso (e a busca no Maps nunca traz): a primeira
+   * mensagem e o contato novo saem como antes.
+   */
+  contexto_da_equipe?: ContextoDaEquipe | null;
 }
 
-/** The existing Maps integrations normalize Brazilian numbers; never guess a foreign country. */
+/**
+ * Telefone do candidato em E.164, ou `null`.
+ *
+ * O provedor de Mapas devolve o número como a empresa o publicou: brasileiro sem
+ * código de país (`(11) 99999-0000`), brasileiro em E.164 (`+55 11 99999-0000`) ou
+ * estrangeiro em E.164 (`+351 912 345 678`). O defeito #3080 mediu o custo de
+ * recusar o terceiro caso: três buscas em Portugal, 59 empresas achadas e nenhuma
+ * abordável, porque todo número que não fosse `+55` virava `null`.
+ *
+ * Sem `+` o país não está no dado, e adivinhar continua fora: só o ramo brasileiro
+ * (10 ou 11 dígitos) prefixa `55`, como antes. Com `+` e OUTRO código de país, o
+ * país está escrito no próprio número — passa, nos 8 a 15 dígitos que o E.164
+ * admite. `55` fica de fora desse ramo de propósito: brasileiro truncado (com `+`,
+ * mas curto demais) não vira estrangeiro. Qualquer outra coisa segue `null`.
+ */
+export function normalizeProspectPhone(raw: string): string | null {
+  let digits = raw.replace(/\D/g, "");
+  if (!raw.startsWith("+") && [10, 11].includes(digits.length)) digits = `55${digits}`;
+  if (/^55\d{10,11}$/.test(digits)) return `+${digits}`;
+  if (raw.startsWith("+") && /^\d{8,15}$/.test(digits) && !digits.startsWith("55")) {
+    return `+${digits}`;
+  }
+  return null;
+}
+
 export function normalizeProspect(item: Record<string, unknown>): Prospect | null {
   const str = (key: string, limit = 500) =>
     typeof item[key] === "string" ? (item[key] as string).trim().slice(0, limit) : null;
@@ -118,9 +464,7 @@ export function normalizeProspect(item: Record<string, unknown>): Prospect | nul
   if (!name || !place || item.permanentlyClosed === true || item.temporarilyClosed === true)
     return null;
   const raw = str("phoneUnformatted") || str("phone") || "";
-  let digits = raw.replace(/\D/g, "");
-  if (!raw.startsWith("+") && [10, 11].includes(digits.length)) digits = `55${digits}`;
-  const phone = /^55\d{10,11}$/.test(digits) ? `+${digits}` : null;
+  const phone = normalizeProspectPhone(raw);
   const urls = (key: string) =>
     Array.isArray(item[key])
       ? (item[key] as unknown[])
@@ -152,6 +496,34 @@ export function safePublicLink(value: string | null): string | undefined {
 }
 
 /** Public business context shared by prospecting and the Inbox; no raw provider payload. */
+export const siteEnrichmentSchema = z.object({
+  ver: z.literal(1),
+  classe: z.enum(["agregador", "sem-site", "site-ok", "site-ruim", "ssl-invalido", "fora-do-ar", "nao-medido"]),
+  problemas: z.array(z.string().max(60)).max(20),
+  checklist: z.object({
+    tem: z.array(z.string().max(30)).max(12),
+    falta: z.array(z.string().max(30)).max(12),
+    // Página montada por JavaScript: o checklist não pôde ser medido (#3723).
+    inconclusivo: z.boolean().optional(),
+  }),
+  final_url: z.string().max(500).nullable(),
+  http_status: z.number().int().min(100).max(599).nullable(),
+  tempo_ms: z.number().int().min(0).max(60000),
+  conteudo_resumo: z.string().max(1500).nullable(),
+  pagespeed: z
+    .object({
+      nota: z.number().int().min(0).max(100),
+      lcp: z.string().max(30).nullable(),
+      medida_em: z.string().max(40),
+    })
+    .nullable(),
+  verificado_em: z.string().max(40),
+  // Com default para as linhas escritas antes do campo existir: ausência =
+  // definitivo antigo, nunca provisório fantasma.
+  provisorio: z.boolean().default(false),
+  tentativas: z.number().int().min(0).max(99).default(0),
+});
+export type SiteEnrichmentValidado = z.infer<typeof siteEnrichmentSchema>;
 export const prospectEnrichmentSchema = z.object({
   name: z.string().max(200),
   category: z.string().max(500).nullable(),
@@ -162,5 +534,6 @@ export const prospectEnrichmentSchema = z.object({
   reviews: z.number().int().nonnegative().nullable(),
   emails: z.array(z.string().max(500)).max(5),
   socials: z.array(z.string().max(500)).max(15),
+  site: siteEnrichmentSchema.optional(),
 });
 export type ProspectEnrichment = z.infer<typeof prospectEnrichmentSchema>;

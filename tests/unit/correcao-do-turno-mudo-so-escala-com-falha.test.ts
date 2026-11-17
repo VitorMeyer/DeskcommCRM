@@ -1,0 +1,282 @@
+/**
+ * A correção do turno mudo só escala com SINAL DE FALHA — nunca por silêncio
+ * deliberado (#2938).
+ *
+ * O defeito que este gate cobre: o CORRECAO_DO_TURNO_MUDO autoriza o modelo a
+ * responder "nada a dizer", então um turno que termina em silêncio mesmo com a
+ * correção rodada NÃO é defeito — e era exatamente isso que um caso humano
+ * falso-positive marcava para o time. O desfecho terminal passou a exigir um
+ * sinal de falha: a saída truncada (length), a correção que TAMBÉM terminou
+ * truncada, a correção que TENTOU enviar e nada saiu, ou a correção que gastou
+ * o teto de passos sem responder. Erro da chamada de correção propaga e o job
+ * falha na fila (retry/dead-letter) — caminho alto que já existia.
+ *
+ * Cenários, na ordem em que o código os garante:
+ *
+ *  1. Recuperação limitada preservada: a correção continua sendo pedida sob as
+ *     condições do próprio pedido (`turno-mudo.ts`) e continua sendo UMA.
+ *  2. Decisão DEPOIS da correção: o desfecho terminal é avaliado com os flags
+ *     e `outcomes` re-avaliados depois dela — correção que recuperou (mensagens
+ *     saíram) nunca vira caso humano.
+ *  3. Silêncio sem razão legítima: nada despachado, primeira passada, e nenhum
+ *     veto IRREVOGÁVEL — veto de ensino não entregou nada e não isenta.
+ *  4. Isenção de silêncio legítimo: descartado, handoff da equipe, teto de
+ *     pacing e preview ficam de fora — mesma régua do truncamento.
+ *  5. Escala só com falha: truncamento não recuperado, correção truncada,
+ *     correção que tentou enviar sem sucesso, ou correção no teto de passos —
+ *     `correcaoDoTurnoMudoPedida` sozinho NÃO escala.
+ *  6. Caso humano com `kind` de TIPOS_DE_CASO ('problema'), copy em português
+ *     simples e gate `agentConfig.casesEnabled` — mesma régua dos outros
+ *     fail-safes.
+ *  7. Nunca duplica: o bloco terminal não despacha nada (só registra e abre
+ *     caso) e `caso.ok` gateia o move do funil.
+ *
+ * Por que contrato de fonte (mesma técnica de saida-truncada-nao-vai-parcial.test.ts):
+ * o detect fica no meio do closure do turno, sem ponto de injeção barato; o que
+ * dá pra prender com segurança é a estrutura — presença, ordem e condições.
+ */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+import { PASSOS_DA_CORRECAO } from "@/lib/agent-engine/agent/turno-mudo";
+
+const ler = (p: string) => readFileSync(join(process.cwd(), p), "utf8");
+const turno = ler("lib/agent-engine/agent/inbound-turn.ts");
+
+// Posições de âncora (fonte única de verdade para as ordens abaixo).
+const idxCorrecaoConst = turno.indexOf("const correcaoDoTurnoMudoPedida =");
+const idxCorrecaoTruncou = turno.indexOf(
+  "correcaoTruncou = correcao.result.finishReason === 'length';",
+);
+const idxCorrecaoIf = turno.indexOf("if (correcaoDoTurnoMudoPedida) {");
+const idxCorrecaoExec = turno.indexOf(
+  "mensagensDoTurno = [...mensagensDoTurno, pedidoDeCorrecao, ...correcao.result.responseMessages];",
+);
+const idxSilencio = turno.indexOf("const silencioSemRazaoLegitima =");
+const idxRoteiro = turno.indexOf("ROTEIRO: a pergunta pendente");
+
+// O bloco que decide o desfecho terminal, do começo da decisão ao fim do bloco.
+const blocoTerminal = () => {
+  expect(idxSilencio).toBeGreaterThan(-1);
+  expect(idxRoteiro).toBeGreaterThan(idxSilencio);
+  return turno.slice(idxSilencio, idxRoteiro);
+};
+/**
+ * O bloco que abre em `idx`, com as chaves EQUILIBRADAS — o `if` até a chave que
+ * de fato o fecha, e não "até o próximo marco do arquivo".
+ *
+ * A distinção não é preciosismo: uma fatia que vai até o marco seguinte conta
+ * a chamada de qualquer passo VIZINHO como se fosse da correção. O que esta
+ * cerca prende é "a correção é UMA"; a distância até o próximo marco é outra
+ * coisa, e é medida pelo teto da região (teste do pedido humano).
+ *
+ * String (simples, dupla, template) e comentário de linha não abrem nem fecham
+ * bloco — sem pular os dois, uma chave dentro de texto desbalancearia a conta.
+ */
+const blocoDeChaves = (texto: string, idx: number): string => {
+  const abre = texto.indexOf("{", idx);
+  expect(abre).toBeGreaterThan(idx);
+  let fundo = 0;
+  for (let i = abre; i < texto.length; i += 1) {
+    const c = texto[i];
+    if (c === "'" || c === '"' || c === "`") {
+      for (i += 1; i < texto.length && texto[i] !== c; i += 1) {
+        if (texto[i] === "\\") i += 1;
+      }
+      continue;
+    }
+    if (c === "/" && texto[i + 1] === "/") {
+      const fim = texto.indexOf("\n", i);
+      if (fim < 0) break;
+      i = fim;
+      continue;
+    }
+    if (c === "{") fundo += 1;
+    else if (c === "}") {
+      fundo -= 1;
+      if (fundo === 0) return texto.slice(idx, i + 1);
+    }
+  }
+  throw new Error(`bloco aberto em ${idx} sem chave de fechamento`);
+};
+
+// O bloco da correção limitada, do `if` à chave que o fecha.
+const blocoCorrecao = () => {
+  expect(idxCorrecaoIf).toBeGreaterThan(-1);
+  expect(idxSilencio).toBeGreaterThan(idxCorrecaoIf);
+  const bloco = blocoDeChaves(turno, idxCorrecaoIf);
+  // A correção continua sendo um passo DENTRO da decisão terminal: o bloco não
+  // pode engolir o que vem depois dela.
+  expect(idxCorrecaoIf + bloco.length).toBeLessThanOrEqual(idxSilencio);
+  return bloco;
+};
+
+describe("recuperação limitada do turno mudo (preservada)", () => {
+  it("a correção é pedida sob as condições do pedido e o valor é capturado ANTES de rodar", () => {
+    expect(idxCorrecaoConst).toBeGreaterThan(-1);
+    expect(idxCorrecaoConst).toBeLessThan(idxCorrecaoIf);
+    // Reusa a régua do próprio pedido — razões legítimas de silêncio nem
+    // chegam a corrigir (turno-mudo.ts é a definição única).
+    const cabeca = turno.slice(idxCorrecaoConst, idxCorrecaoIf);
+    expect(cabeca).toContain("turnoMudoPedeCorrecao({");
+    expect(cabeca).toContain("enviadas: outcomes.length,");
+    expect(cabeca).toContain("liveJob().kind === 'inbound_turn'");
+    // O sinal de falha da correção é declarado junto com o pedido, falso por
+    // padrão (logo acima da const) — silêncio deliberado não nasce escalado.
+    const idxCorrecaoTruncouDecl = turno.indexOf("let correcaoTruncou = false;");
+    expect(idxCorrecaoTruncouDecl).toBeGreaterThan(-1);
+    expect(idxCorrecaoTruncouDecl).toBeLessThan(idxCorrecaoConst);
+  });
+
+  it("a correção continua UMA só — um único runModelCall, steps limitados", () => {
+    const bloco = blocoCorrecao();
+    expect(bloco.split("await runModelCall(").length - 1).toBe(1);
+    // O teto é 6, e não 3: medido no teste 10 do aceite (2026-10-26, job
+    // 5ca40cb3) a correção com 3 passos gastou OS TRÊS em ferramentas de agenda
+    // (crm_list_event_types → crm_find_free_slots → crm_find_and_book_appointment)
+    // e parou antes de chegar ao send_message — `messages_sent: 0`, cliente sem
+    // resposta. Uma remarcação correta são 4 saídas de modelo (localizar com
+    // crm_list_appointments → slot → crm_reschedule_appointment → send_message);
+    // com teto 3 ela é aritmeticamente impossível. O limite CONTINUA existindo
+    // (correção é UMA e limitada) — só é folgado o bastante para a receita caber.
+    expect(PASSOS_DA_CORRECAO).toBe(6);
+    // O MESMO teto roda a correção E mede se ela bateu nele (`tetoNaCorrecao`):
+    // com dois literais, a régua ficou em 3 enquanto a correção rodava com 6.
+    expect(bloco.split("Math.min(maxSteps, PASSOS_DA_CORRECAO)").length - 1).toBe(2);
+    expect(bloco).not.toMatch(/Math\.min\(maxSteps, \d+\)/);
+    // O pedido de correção é a instrução canônica do motor.
+    expect(bloco).toContain("CORRECAO_DO_TURNO_MUDO");
+    // Nenhum desfecho terminal dentro da correção — decisão é separada.
+    expect(bloco).not.toContain("output_truncated_recovered_failed");
+    expect(bloco).not.toContain("openCase(");
+  });
+});
+
+describe("o pedido humano (#3281) ocupa a vaga da correção — não é um passo a mais", () => {
+  it("teto da região correção→decisão: UMA chamada de modelo, nunca duas", () => {
+    // Na prévia assistida o pedido humano troca a INSTRUÇÃO da correção; não
+    // ganha chamada própria. Um segundo `runModelCall` aqui é um clique pagando
+    // três chamadas (turno + correção + pedido) e tem de doer neste teste.
+    const regiao = turno.slice(idxCorrecaoIf, idxSilencio);
+    expect(regiao.split("await runModelCall(").length - 1).toBe(1);
+    expect(blocoCorrecao()).toContain("INSTRUCAO_DO_PEDIDO_HUMANO");
+  });
+});
+
+describe("decisão terminal: DEPOIS da correção, com os flags re-avaliados", () => {
+  it("a ordem é: pedir correção → executar → medir a falha → decidir o desfecho", () => {
+    expect(idxCorrecaoConst).toBeLessThan(idxCorrecaoIf);
+    expect(idxCorrecaoIf).toBeLessThan(idxCorrecaoTruncou);
+    expect(idxCorrecaoTruncou).toBeLessThan(idxCorrecaoExec);
+    // A decisão lê `outcomes`/flags DEPOIS da correção rodar: recuperação
+    // bem-sucedida (mensagens saíram) é vista como `outcomes.length > 0`.
+    expect(idxCorrecaoExec).toBeLessThan(idxSilencio);
+  });
+
+  it("os sinais de falha da correção: truncada (length), tentou enviar, teto de passos", () => {
+    const bloco = blocoCorrecao();
+    expect(bloco).toContain("correcaoTruncou = correcao.result.finishReason === 'length';");
+    // "Tentou" é medido SÓ dentro da correção: as tentativas da primeira chamada
+    // já pediram a correção, e contá-las de novo escalaria o silêncio escolhido.
+    const antes = bloco.indexOf("const tentativasAntesDaCorrecao = tentativasDeEnvio;");
+    const chamada = bloco.indexOf("await runModelCall(");
+    const depois = bloco.indexOf("correcaoTentouEnviar = tentativasDeEnvio > tentativasAntesDaCorrecao;");
+    expect(antes).toBeGreaterThan(-1);
+    expect(antes).toBeLessThan(chamada);
+    expect(depois).toBeGreaterThan(chamada);
+    expect(bloco).toContain("tetoNaCorrecao = tetoDePassosAtingido({");
+  });
+
+  it("silêncio sem razão legítima: nada despachado, primeira passada, sem veto irrevogável", () => {
+    const bloco = blocoTerminal();
+    expect(bloco).toContain("outcomes.length === 0");
+    expect(bloco).toContain("seq === 0");
+    expect(bloco).toContain("!preview");
+    // O veto que manda PARAR (opt-out, contato interno, LGPD) é decisão. O veto
+    // de ENSINO não é: não entregou nada ao cliente. A régua antiga
+    // (`tentativasDeEnvio === 0`, "o veto já ensinou") calava o turno em que a
+    // cadeia barrou a resposta na primeira chamada e de novo na correção.
+    expect(bloco).toContain("!vetoIrrevogavel");
+    expect(bloco).not.toContain("tentativasDeEnvio === 0");
+  });
+
+  it("isenta silêncio legítimo: descartado, handoff da equipe e teto de pacing", () => {
+    const bloco = blocoTerminal();
+    expect(bloco).toContain("!turnoDescartado");
+    expect(bloco).toContain("!passouParaAEquipe");
+    expect(bloco).toContain("!capDeEnvioAtingido()");
+  });
+
+  it("só escala com sinal de FALHA — nunca por ter corrigido", () => {
+    const bloco = blocoTerminal();
+    expect(bloco).toContain(
+      "if (silencioSemRazaoLegitima && (saidaTruncada || correcaoTruncou || correcaoTentouEnviar || tetoNaCorrecao)) {",
+    );
+    // O gatilho antigo — correção apenas PEDIDA — é exatamente o regresso que
+    // fazia silêncio deliberado abrir caso à toa.
+    expect(bloco).not.toMatch(
+      /silencioSemRazaoLegitima && \(saidaTruncada \|\| correcaoDoTurnoMudoPedida\)/,
+    );
+  });
+});
+
+describe("desfecho distinto, caso humano único, nunca duplica", () => {
+  it("causa vira código próprio: truncada ≠ correção truncada (truncamento preservado)", () => {
+    const bloco = blocoTerminal();
+    expect(bloco).toContain("const desfechoTerminal = saidaTruncada");
+    expect(bloco).toContain("? 'output_truncated_recovered_failed'");
+    expect(bloco).toContain("? 'correction_truncated_failed'");
+    expect(bloco).toContain("? 'correction_send_blocked_failed'");
+    expect(bloco).toContain(": 'correction_step_cap_failed';");
+    // Cada causa tem o seu "Por que a IA travou" na tela do time.
+    for (const c of ["output_truncated_recovered_failed", "correction_truncated_failed", "correction_send_blocked_failed", "correction_step_cap_failed"]) {
+      expect(bloco).toContain(`${c}:\n`);
+    }
+    // O mesmo mecanismo suportado de caso humano, com a causa no snapshot.
+    expect(bloco).toContain("openCase(");
+    expect(bloco).toContain("source: 'guardrail_autofallback'");
+    expect(bloco).toContain("correcao_limitada_rodou: correcaoDoTurnoMudoPedida");
+    expect(bloco).toContain("correcao_truncou: correcaoTruncou");
+    expect(bloco).toContain("correcao_tentou_enviar: correcaoTentouEnviar");
+  });
+
+  it("caso com `kind` de TIPOS_DE_CASO e copy em português simples (sem código de máquina)", () => {
+    const bloco = blocoTerminal();
+    // `kind: 'problema'` vem do vocabulário do product (case-copy.ts) — um kind
+    // inventado faz a tela do time mostrar "Outro".
+    expect(bloco).toContain("kind: 'problema'");
+    // blocker/summary são exibidos ao time ("Por que a IA travou"/"O que o
+    // cliente precisa") — nenhum rótulo de máquina neles.
+    expect(bloco).not.toContain("saida_truncada");
+    expect(bloco).not.toContain("finish_reason=length");
+  });
+
+  it("casesEnabled gateia o caso — mesma régua dos fail-safes clínico e de promessa", () => {
+    const bloco = blocoTerminal();
+    expect(bloco).toContain("agentConfig?.casesEnabled === true");
+    expect(bloco).toContain("!openedCaseThisTurn");
+    expect(bloco).toContain("hasOpenCaseForContact(pool, tenantId, input.conversationId)");
+    // A FALHA continua visível pelo log mesmo com cases desligados.
+    expect(bloco).toContain("runLog.error(`${desfechoTerminal} — sem nenhuma mensagem entregue`");
+  });
+
+  it("um caso por turno: `caso.ok` gateia o move do funil e a falha fica visível", () => {
+    const bloco = blocoTerminal();
+    expect(bloco).toContain("if (caso.ok) {");
+    expect(bloco).toContain("openedCaseThisTurn = true;");
+    expect(bloco).toContain("moverParaHandoffBestEffort(desfechoTerminal);");
+    // Caso já aberto → log distinto, sem segundo move; openCase que lançou
+    // também fica visível (não engole a causa original).
+    expect(bloco).toContain("caso humano não abriu (já existe)");
+    expect(bloco).toContain("openCase lançou");
+  });
+
+  it("o bloco terminal não despacha nada — nunca duplica mensagem nem re-tenta envio", () => {
+    const bloco = blocoTerminal();
+    expect(bloco).not.toContain("await runModelCall(");
+    expect(bloco).not.toContain("runBeforeSend");
+    expect(bloco).not.toContain("sendTurnMessage");
+  });
+});

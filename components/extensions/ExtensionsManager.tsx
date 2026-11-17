@@ -270,7 +270,15 @@ export function ExtensionsManager({
   const hasPreparing = data?.operations.some((operation) => operation.status === "preparing");
   useEffect(() => {
     if (!hasPreparing) return;
-    const interval = window.setInterval(() => void carregar(true), 3_000);
+    const interval = window.setInterval(() => {
+      // ABA OCULTA NÃO CONFERE (refs #2821, a convenção da casa): a preparação
+      // é uma tela de espera — com a aba escondida ninguém está olhando o
+      // cartão, e cada tick de 3 s custa a leitura inteira das extensões. A
+      // volta à aba já recarrega sozinha: o `focus` acima dispara no instante
+      // em que a pessoa retorna, então nada fica velho por causa da pausa.
+      if (document.visibilityState !== "visible") return;
+      void carregar(true);
+    }, 3_000);
     return () => window.clearInterval(interval);
   }, [carregar, hasPreparing]);
 
@@ -648,9 +656,13 @@ export function ExtensionsManager({
         }
         return { ok: false, message: t(result.error.message) };
       }
+      // O tema da extensão é pintado no servidor (`app/app/layout.tsx`), e o layout
+      // não re-renderiza sozinho: sem isto, ligar ou trocar a paleta dizia "Configuração
+      // salva." e a tela só mudava de cor depois de recarregar a página.
+      router.refresh();
       return { ok: true, message: t("Configuração salva.") };
     },
-    [carregar, organizationId, runMutation, t],
+    [carregar, organizationId, router, runMutation, t],
   );
 
   const verifyOperation = useCallback(

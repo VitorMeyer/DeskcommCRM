@@ -3,8 +3,10 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { mkdirSync } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
-import { test, expect, type Page } from "./helpers/test";
+import { esperarARevelacaoNasCargas, test, expect, type Page } from "./helpers/test";
 import { credenciaisSupabaseDeTeste } from "../../scripts/lib/env-de-teste";
+import { trocarIdiomaPelaTela } from "./helpers/idioma";
+import { MedidorDeHops } from "./helpers/medir-hops";
 
 const credentials = credenciaisSupabaseDeTeste();
 const db = createClient(credentials.url, credentials.serviceRole, {
@@ -71,7 +73,11 @@ test("fechar canal preserva demanda, desfecho explícito e nova entrada volta à
 }) => {
   test.setTimeout(180_000);
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  context.on("page", esperarARevelacaoNasCargas);
   const page = await context.newPage();
+  // Medição por elo da rajada do inbox (#2399) — inerte sem E2E_MEDIR_HOPS=1.
+  const medidor = new MedidorDeHops(page);
+  medidor.iniciar();
   const password = `Local-${randomUUID()}!`,
     email = `service-${randomUUID()}@invariant.test`;
   let org = "",
@@ -195,7 +201,7 @@ test("fechar canal preserva demanda, desfecho explícito e nova entrada volta à
     // longo — se ele quebrar a fileira ou sumir, é aqui que aparece. Cabe nesta
     // spec, e não numa nova, porque o painel já está montado neste ponto: spec
     // nova custaria mais um login e mais um seed ao relógio do CI.
-    await expect(page.getByRole("button", { name: "Novo Lead", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Novo negócio", exact: true })).toBeVisible();
     // Fechar não é mais `window.confirm()` (bloqueado em iframe, ignora o
     // tema) — é o `AlertDialog` da casa. O botão que abre e o que confirma
     // têm o MESMO rótulo "Fechar"; o segundo clique escopado ao
@@ -231,6 +237,7 @@ test("fechar canal preserva demanda, desfecho explícito e nova entrada volta à
     await panel.getByRole("button", { name: "Confirmar desfecho", exact: true }).click();
     await expect(panel).toContainText("Nenhuma demanda aberta.");
     await expect(page.getByTestId("inbox-memoria")).toContainText("Histórico encerrado");
+    medidor.marcar("antes_da_entrada_2");
     await inbound("Voltei para novo atendimento");
     // Aqui a tela não navega, só o realtime atualiza. Quando isto falhou (run
     // 37320609105), o que separou a falha do controle aprovado (run 37329560310,
@@ -238,6 +245,7 @@ test("fechar canal preserva demanda, desfecho explícito e nova entrada volta à
     // pedidos que nunca são cancelados — causa não explicada, issue #2399.
     // O prazo explícito ainda reprova o painel que nunca atualiza.
     await expect(panel.getByText("Demanda vigente neste canal")).toBeVisible(PRAZO_DA_RECARGA);
+    medidor.marcar("depois_da_asseracao_240");
     await page.goto("/app/inbox?filter=unassigned");
     await page.getByText("Voltei para novo atendimento", { exact: true }).first().click();
     await expect(
@@ -292,9 +300,8 @@ test("fechar canal preserva demanda, desfecho explícito e nova entrada volta à
     await page.screenshot({ path: `${evidence}/task4-caso-obsoleto-aviso.png`, fullPage: true });
     await abrirConversa(page, conversation);
     await expect(page.getByTestId("inbox-memoria")).toContainText("Histórico encerrado", PRAZO_DA_RECARGA);
-    const language = await db.auth.admin.updateUserById(user, { user_metadata: { locale: "es" } });
-    if (language.error) throw language.error;
-    await page.reload();
+    // Pela tela: o idioma viaja no cache curto da autorização (#3696), e quem invalida é o `trocarIdioma`.
+    await trocarIdiomaPelaTela(page, "es");
     await expect(page.getByTestId("inbox-memoria")).toContainText("Historial cerrado — sin tareas pendientes", PRAZO_DA_RECARGA);
     await expect(page.getByTestId("inbox-memoria")).toContainText("Resuelto");
     await page.screenshot({ path: `${evidence}/task4-historico-es.png`, fullPage: true });
@@ -309,6 +316,7 @@ test("fechar canal preserva demanda, desfecho explícito e nova entrada volta à
     expect(hits.filter((url) => url.includes("sendText"))).toHaveLength(1);
 
   } finally {
+    medidor.despejar(`${evidence}/hops-2399.json`);
     await context.close().catch(() => undefined);
     await new Promise<void>((resolve) => receiver.close(() => resolve()));
     if (org) await db.from("organizations").delete().eq("id", org);

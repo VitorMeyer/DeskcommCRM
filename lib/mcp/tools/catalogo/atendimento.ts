@@ -73,11 +73,17 @@ export const TOOLS_ATENDIMENTO = declararTools([
     // Nenhum dos dois gerou conflito de texto — o `tsc` é que reprovou no merge.
     rotulo: "Anotar dado que o cliente informou",
     explicacao:
-      "Quando o cliente diz o e-mail, o nome ou o telefone dele na conversa, guarda essa informação para uma pessoa conferir antes de entrar na ficha.",
+      "Guarda o dado informado para revisão humana. A empresa pode permitir, em Configurações › Distribuição " +
+      "de atendimento, preencher telefone vazio ou nome vazio. Nome exige mensagem real do próprio contato " +
+      "neste atendimento; nome preexistente diferente e e-mail continuam aguardando confirmação.",
     oQueToca: "Cadastro de clientes",
-    // `atencao`, não `critico`: nada sai para o cliente e nada entra na ficha
-    // por conta dela — o peso mora na confirmação, que é humana. Marcar
-    // `critico` aqui faria a tela pedir cerimônia para uma anotação.
+    // `atencao`, não `critico`: nada sai para o cliente, e os ÚNICOS dados que
+    // entram na ficha por conta desta ferramenta são o telefone de um cadastro
+    // SEM número (#2593) e o nome de um cadastro SEM nome (#3784) — sozinhos,
+    // sem sobrescrever nada, com auditoria e rastro na linha do tempo, E SÓ COM
+    // A OPÇÃO DA ORGANIZAÇÃO LIGADA (as duas vêm desligadas). O resto continua
+    // esperando a confirmação humana, que é onde o peso mora. Marcar `critico`
+    // aqui faria a tela pedir cerimônia para uma anotação.
     risco: "atencao",
     // ⚠️ FORA de "atender", e a razão é o TETO — não o valor da capacidade.
     //
@@ -136,6 +142,26 @@ export const TOOLS_ATENDIMENTO = declararTools([
       "Envia uma mensagem de WhatsApp para o cliente. Ele recebe de verdade, no celular dele, e não dá para desfazer.",
     oQueToca: "Atendimento",
     risco: "critico",
+    pacotes: ["atender"],
+  },
+  {
+    name: "crm_send_material",
+    category: "write",
+    rotulo: "Enviar material da empresa",
+    explicacao:
+      "Envia um material da empresa já cadastrado — catálogo em PDF, tabela de preços, ficha — " +
+      "como documento no WhatsApp, com a legenda que acompanha. O arquivo sai do material " +
+      "cadastrado, não de um link: nada é lido nem consultado pela IA.",
+    oQueToca: "Atendimento",
+    // `critico` como `crm_send_whatsapp_message`: alcança o cliente de verdade e
+    // não dá para desfazer. Crítica não entra por pacote (`entraPorPacote`), então
+    // ligar "Atender e responder" não dá ao agente o direito de mandar arquivo.
+    risco: "critico",
+    // `atender` é a jornada do envio, e o pacote tem vaga para a crítica: a conta
+    // dele vai de 21 para 22 vagas com esta capacidade, contra o teto de 27
+    // (`tests/unit/pacote-reserva-vaga-da-critica.test.ts`). Fica FORA de
+    // `evoluir` de propósito — era o único pacote que ainda cabia a partir do
+    // onboarding, e uma capacidade a mais ali fecharia o beco que a #162 mede.
     pacotes: ["atender"],
   },
   {

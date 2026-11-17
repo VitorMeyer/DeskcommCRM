@@ -6,19 +6,28 @@ import { Input } from "@/components/ui/input";
 import { apiClient } from "@/lib/api/client";
 import { ApiError } from "@/lib/api/types";
 import { useT } from "@/hooks/i18n/useT";
+import { useTelefoneExemplo } from "@/hooks/contacts/useTelefoneExemplo";
 
-/** Both entry points share the form; the parent keeps polling for WORKING. */
+/**
+ * Both entry points share the form; the parent keeps polling for WORKING.
+ *
+ * O exemplo do telefone é do país da organização (`perfil.telefoneExemplo`), não « +55 » em duro.
+ * O onboarding, que não tem `AuthProvider`, o entrega por `telefoneExemplo`; Conexões o lê do contexto.
+ */
 export function PairingOptions({
   sessionId,
   qr,
+  telefoneExemplo,
   pairingCodeUrl,
 }: {
   sessionId: string;
   qr: ReactNode;
+  telefoneExemplo?: string;
   /** Another transport can expose the same code flow through its own session seam. */
   pairingCodeUrl?: string;
 }) {
   const t = useT();
+  const exemploDoPais = useTelefoneExemplo();
   const id = useId();
   const [mode, setMode] = useState<"qr" | "code">("qr");
   const [phone, setPhone] = useState("");
@@ -109,7 +118,7 @@ export function PairingOptions({
             id={id}
             type="tel"
             autoComplete="tel"
-            placeholder="+55 11 99999-9999"
+            placeholder={telefoneExemplo ?? exemploDoPais}
             required
             maxLength={32}
             value={phone}

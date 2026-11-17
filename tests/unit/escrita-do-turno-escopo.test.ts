@@ -116,7 +116,7 @@ afterEach(() => vi.restoreAllMocks());
 
 /** Ferramenta → como montar os args com um alvo, e os alvos do turno e de B. */
 const CASOS: Array<{ nome: string; args: (alvo: string) => Linha; doTurno: string; deB: string }> = [
-  ...["crm_book_appointment", "crm_find_and_book_appointment", "crm_propose_contact_field", "crm_schedule_followup"].map(
+  ...["crm_book_appointment", "crm_find_and_book_appointment", "crm_propose_contact_field", "crm_save_lead_diagnosis", "crm_schedule_followup"].map(
     (nome) => ({ nome, args: (a: string) => ({ contact_id: a }), doTurno: DO_TURNO, deB: DE_B }),
   ),
   { nome: "crm_enroll_followup_flow", args: (a) => ({ contact_id: a, flow_id: FUNIL }), doTurno: DO_TURNO, deB: DE_B },
@@ -190,6 +190,16 @@ describe("toda escrita montável no turno tem o dono de cada identificador decla
       (ESCOPO_DAS_ESCRITAS as Record<string, unknown>).crm_save_org_memory = original;
     }
   });
+
+  // Nome de ferramenta remota (#2147) é escolhido pelo servidor alheio: um que
+  // coincida com propriedade herdada do objeto não pode valer como entrada.
+  it.each(["constructor", "valueOf", "toString", "hasOwnProperty", "__proto__"])(
+    "nome herdado de Object.prototype (%s) é recusado como escrita sem entrada",
+    async (nome) => {
+      const r = await escritaCabeNoTurno({} as never, ORG, DO_TURNO, nome, {});
+      expect(r).toMatchObject({ permitido: false, motivo: "escrita_sem_escopo_do_turno" });
+    },
+  );
 });
 
 describe("forma do valor num campo declarado", () => {

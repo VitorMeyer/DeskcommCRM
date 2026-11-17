@@ -10,9 +10,10 @@
  *     passa POR `escritaCabeNoTurno` e é recusada com
  *     `escrita_sem_escopo_do_turno` — a regra da main (382f3c790), não uma
  *     variante dela. Classificá-la como `read` seria atravessá-la.
- *  3. ESCOLHA (b): até existir identificação forçada do contato na chamada ao
- *     servidor remoto, `carregarServidorMcpExterno` não carrega servidor para
- *     turno com contato — nenhum turno de conversa, Conversador ou Operador.
+ *  3. ESCOLHA (b): sem a opção `mcp_externo_no_atendimento` do agente,
+ *     `carregarServidorMcpExterno` não carrega servidor para turno com contato
+ *     — nenhum turno de conversa, Conversador ou Operador. Com a opção, a
+ *     identidade do contato vai forçada em cabeçalho (ver `externo.test.ts`).
  *
  * As três têm de estar de pé ao mesmo tempo: a 3 fecha o risco sem protocolo
  * novo no servidor alheio, a 2 garante que uma remota malclassificada não passa
@@ -33,6 +34,7 @@ import type { ServidorMcpExterno } from "@/lib/mcp/servidor-externo/registro";
 import { definirFerramentasRemotas } from "@/lib/mcp/tools/externo";
 import type { McpAuthResult } from "@/lib/mcp/auth";
 import type { McpContext } from "@/lib/mcp/types";
+import { ehLeituraRemota } from "@/lib/mcp/servidor-externo/leitura-remota";
 
 const ORG = "bcc12320-f555-4fef-8d90-38a0ac5950e0";
 const CONTATO = "11111111-1111-4111-8111-111111111111";
@@ -139,8 +141,13 @@ describe("uma remota só conta como leitura com as DUAS metades (item 8)", () =>
 
 // ─── 2. A regra da conversa ──────────────────────────────────────────────────
 
-describe("remota classificada como escrita cai na conferência de escopo do turno", () => {
-  it("recusa com `escrita_sem_escopo_do_turno` — passa POR ela, não por fora", async () => {
+// #4445 — a recusa da escrita remota em turno com contato deixou de ser a
+// genérica de escopo do turno (`escrita_sem_escopo_do_turno`) e passou a ser a
+// NOMEADA da liberação (`escrita_nao_liberada`, com ferramenta e conexão):
+// continua recusando, e a lista que a libera é explícita
+// (`lib/mcp/servidor-externo/escrita-liberada.ts`).
+describe("remota classificada como escrita é recusada no turno com contato", () => {
+  it("recusa com `escrita_nao_liberada` — passa pela ponte, não por fora", async () => {
     const montadas = montar({ escolha: toolIdRemoto("erp_cancelar_pedido", "escrita"), contato: CONTATO });
     const ferramenta = montadas.erp_cancelar_pedido as unknown as {
       execute: (a: unknown) => Promise<unknown>;
@@ -150,7 +157,7 @@ describe("remota classificada como escrita cai na conferência de escopo do turn
     const resposta = await ferramenta.execute({ pedido_id: "1" });
     expect(resposta).toMatchObject({
       permitido: false,
-      motivo: "escrita_sem_escopo_do_turno",
+      motivo: "escrita_nao_liberada",
     });
   });
 
@@ -161,7 +168,7 @@ describe("remota classificada como escrita cai na conferência de escopo do turn
     };
     expect(await ferramenta.execute({ pedido_id: "1" })).toMatchObject({
       permitido: false,
-      motivo: "escrita_sem_escopo_do_turno",
+      motivo: "escrita_nao_liberada",
     });
   });
 
@@ -185,11 +192,22 @@ describe("remota classificada como escrita cai na conferência de escopo do turn
     const montadas = montar({ escolha: toolIdRemoto("erp_consultar_pedido", "leitura") });
     expect(montadas.erp_consultar_pedido).toBeDefined();
   });
+
+  it("só a remota classificada como leitura leva a marca que a prévia libera", () => {
+    // `preview.ts` executa a remota só com esta marca: a escolha "leitura" sem
+    // `readOnlyHint` e a escolha "escrita" saem SEM ela, e seguem fechadas lá.
+    const leitura = montar({ escolha: toolIdRemoto("erp_consultar_pedido", "leitura") });
+    const semHint = montar({ escolha: toolIdRemoto("erp_faturar_pedido", "leitura") });
+    const escrita = montar({ escolha: toolIdRemoto("erp_consultar_pedido", "escrita") });
+    expect(ehLeituraRemota(leitura.erp_consultar_pedido)).toBe(true);
+    expect(ehLeituraRemota(semHint.erp_faturar_pedido)).toBe(false);
+    expect(ehLeituraRemota(escrita.erp_consultar_pedido)).toBe(false);
+  });
 });
 
 // ─── 3. Escolha (b) na origem ────────────────────────────────────────────────
 
-describe("turno com contato não carrega servidor remoto nenhum (item 8, escolha (b))", () => {
+describe("turno com contato, sem a opção do agente, não carrega servidor remoto nenhum (item 8, escolha (b))", () => {
   it("devolve `null` sem tocar em banco e sem abrir rede", async () => {
     const supabase = supabaseDeMentira();
     const montado = await carregarServidorMcpExterno(supabase.cliente, ORG, {

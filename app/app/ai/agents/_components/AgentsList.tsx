@@ -8,6 +8,7 @@ import { Robot, Plus } from "@/lib/ui/icons";
 import { useT } from "@/hooks/i18n/useT";
 import { useAgentsList } from "@/hooks/ai/useAgents";
 import type { AgentRow } from "@/hooks/ai/useAgent";
+import { filtrarAgentes } from "@/lib/ai/agents/filtrar-agentes";
 import { AgentCard } from "./AgentCard";
 import { AgentsListFilters, type StatusFilter } from "./AgentsListFilters";
 import { deriveAgentStatus } from "./AgentStatusBadge";
@@ -27,30 +28,32 @@ export function AgentsList({ initialData, canWrite }: Props) {
   const agents = data ?? [];
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return agents.filter((a) => {
+    // #4165: o casamento do termo é de `lib/ai/agents/filtrar-agentes.ts`, fora
+    // do componente e testável sem DOM. O filtro por status e por arquivados
+    // continua sendo desta tela.
+    const porStatus = agents.filter((a) => {
       const s = deriveAgentStatus(a);
       if (!showArchived && s === "archived") return false;
       if (status !== "all" && s !== status) return false;
-      if (q && !a.name.toLowerCase().includes(q)) return false;
       return true;
     });
+    return filtrarAgentes(porStatus, query);
   }, [agents, status, query, showArchived]);
 
   if (!isLoading && agents.length === 0) {
     return (
       <Card className="flex flex-col items-center gap-3 p-10 text-center">
         <Robot size={36} aria-hidden className="text-muted-foreground" />
-        <h2 className="font-medium">{t("Nenhum agent configurado")}</h2>
+        <h2 className="font-medium">{t("Nenhum agente configurado")}</h2>
         <p className="max-w-sm text-sm text-muted-foreground">
           {t(
-            "Crie um agent para responder a conversas no WhatsApp com IA. Você configura prompt, tools, gatilhos e janela de contexto.",
+            "Crie um agente para responder a conversas no WhatsApp com IA. Você configura prompt, tools, gatilhos e janela de contexto.",
           )}
         </p>
         {canWrite && (
           <Link href="/app/ai/agents/new">
             <Button className="mt-1">
-              <Plus size={14} aria-hidden className="mr-2" /> {t("Novo agente")}
+              <Plus size={14} aria-hidden className="mr-2" /> {t("Criar novo")}
             </Button>
           </Link>
         )}
@@ -72,7 +75,7 @@ export function AgentsList({ initialData, canWrite }: Props) {
         {canWrite && (
           <Link href="/app/ai/agents/new">
             <Button>
-              <Plus size={14} aria-hidden className="mr-2" /> {t("Novo agente")}
+              <Plus size={14} aria-hidden className="mr-2" /> {t("Criar novo")}
             </Button>
           </Link>
         )}
@@ -80,7 +83,7 @@ export function AgentsList({ initialData, canWrite }: Props) {
 
       {filtered.length === 0 ? (
         <Card className="p-8 text-center text-sm text-muted-foreground">
-          {t("Nenhum agent corresponde aos filtros atuais.")}
+          {t("Nenhum agente corresponde aos filtros atuais.")}
         </Card>
       ) : (
         <ul className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">

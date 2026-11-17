@@ -35,16 +35,47 @@ import {
   configDoSilencio,
   type DirecaoDoSilencio,
 } from "@/lib/automation/gatilhos-de-tempo";
+import {
+  DIAS_DE_ANTECEDENCIA_MAX,
+  configDoAniversario,
+} from "@/lib/automation/aniversario-do-contato";
 import { configAoSalvarDaTela } from "@/lib/automation/config-ao-salvar";
-import { camposDoFunil } from "@/lib/leads/campos-do-funil";
+import {
+  INTERVALO_POR_CONTATO_MAX_HORAS,
+  INTERVALO_POR_CONTATO_MIN_HORAS,
+  horasDoIntervaloDaTela,
+  horasDoIntervaloNaConfig,
+} from "@/lib/automation/limite-por-contato";
+import {
+  CAMPOS_ALTERAVEIS_DO_NEGOCIO,
+  CONDICOES_DO_CONTATO,
+  OPERADORES_SEM_VALOR,
+  operadorCabeNoCampo,
+  rotuloDoCampoAlterado,
+  valorPadraoDoCampo,
+  type ConditionNode,
+  type ConditionOp,
+  type Conditions,
+} from "@/lib/automation/conditions";
+import { camposDeDataDoNegocio } from "@/lib/leads/campos-do-funil";
 import {
   useCreateAutomationRule,
   useUpdateAutomationRule,
   type AutomationRuleRow,
 } from "@/hooks/webhooks/useAutomationRules";
 import { usePipelines, usePipelineStages, useWebhookSources } from "@/hooks/webhooks/useWebhookSources";
-import { TRIGGER_LABELS, ACTION_LABELS, type TriggerEvent, type ActionType } from "./labels";
+import {
+  TRIGGER_LABELS,
+  ACTION_LABELS,
+  acaoOferecida,
+  gatilhoOferecido,
+  type TriggerEvent,
+  type ActionType,
+} from "./labels";
+import { useCapacidadesLigadas, useModulosLigados } from "@/hooks/auth/AuthProvider";
 import { ActionConfigForm, defaultActionConfig, type ActionItem } from "./ActionConfigForm";
+import { EtapaDeQualquerFunil } from "./EtapaDeQualquerFunil";
+import { ValorDaCondicaoDoContato } from "./CondicaoDoContato";
 import { useT } from "@/hooks/i18n/useT";
 
 interface Props {
@@ -53,7 +84,7 @@ interface Props {
   rule: AutomationRuleRow | null;
 }
 
-type Op = "eq" | "neq" | "contains";
+export type Op = ConditionOp;
 
 interface ConditionRow {
   field: string;
@@ -61,11 +92,25 @@ interface ConditionRow {
   value: string;
 }
 
-interface CuratedField {
+/**
+ * Como o grupo do TOPO combina as condições (#2727). O motor guarda a lista
+ * simples ou um grupo `{all:…}`/`{any:…}` do TOPO (a porta recusa aninhamento;
+ * ver `conditionGroupSchema`); a tela expõe esse grupo e serializa
+ * `todas` como a lista simples (o formato antigo, ≡ `all`) e `qualquer` como
+ * `{any:[…]}`. Grupos ANINHADOS são do modelo/avaliador, não desta tela.
+ */
+type ModoDoGrupo = "todas" | "qualquer";
+
+export interface CuratedField {
   value: string;
   label: string;
   op: Op;
-  kind?: "stage";
+  /**
+   * Como o campo pede o valor: `stage` desenha o seletor de etapas; `sim_nao`
+   * é a condição do contato (#3814) — sim/não, com prazo e tipo na de agenda
+   * (`ValorDaCondicaoDoContato`). Ausente = texto livre.
+   */
+  kind?: "stage" | "sim_nao";
   /**
    * O campo guarda uma LISTA (tags). Em lista, `contains` é pertinência — a tag
    * inteira, sem diferenciar caixa (decisão do dono, #956) —, e chamar isso de
@@ -125,10 +170,9 @@ const AGENDAMENTO_FIELDS: CuratedField[] = [
   { value: "contact.tags", label: "Tags do contato", op: "contains", lista: true },
 ];
 
-// ponytail: etapa de destino usa o funil default (cobre o caso comum de 1
-// funil); se o produto ganhar múltiplos funis relevantes aqui, trocar por um
-// seletor de funil antes do de etapa.
-const CURATED_FIELDS: Record<TriggerEvent, CuratedField[]> = {
+// A etapa de destino lista as etapas de todos os funis, agrupadas
+// (`EtapaDeQualquerFunil`); antes, só as do funil padrão.
+export const CURATED_FIELDS: Record<TriggerEvent, CuratedField[]> = {
   "lead.created": LEAD_FIELDS,
   "lead.stage_changed": [...LEAD_FIELDS, STAGE_FIELD],
   // #1528 — os quatro do encerramento/reabertura/atribuição: as condições são
@@ -150,6 +194,10 @@ const CURATED_FIELDS: Record<TriggerEvent, CuratedField[]> = {
   ],
   "lead.tag_added": [...LEAD_FIELDS, TAG_ADDED_FIELD],
   "contact.tag_added": [TAG_ADDED_FIELD],
+  // #2812 — quem filtra "o contato ganhou telefone" filtra por QUEM é o contato
+  // (tags), como o irmão `contact.birthday`: o telefone em si é o gatilho, e
+  // virar condição seria uma regra sempre-verdadeira disfarçada de filtro.
+  "contact.phone_added": CONTACT_FIELDS,
   "appointment.created": AGENDAMENTO_FIELDS,
   "appointment.confirmed": AGENDAMENTO_FIELDS,
   "appointment.rescheduled": AGENDAMENTO_FIELDS,
@@ -175,9 +223,48 @@ const CURATED_FIELDS: Record<TriggerEvent, CuratedField[]> = {
   // funil (via etapa/tags) e tags do contato.
   "lead.silent_for": LEAD_FIELDS,
   "lead.stage_stale": [...LEAD_FIELDS, STAGE_FIELD],
+  // #1749 — "negócio alterado". A condição própria do gatilho é "o campo X está
+  // entre os nomes que a edição mudou"; os VALORES do negócio nunca viajam no
+  // evento, e para filtrar pelo valor ATUAL valem os campos do lead (hidratados
+  // no contexto), como em qualquer gatilho de negócio.
+  "lead.updated": [
+    { value: "event.fields", label: "Nome do campo alterado", op: "campo_alterado" },
+    ...LEAD_FIELDS,
+  ],
+  // #4365 — as condições são as do CONTATO: quem monta a regra quer filtrar
+  // QUEM ligou (tags, nome), e o fato em si (a ligação perdida) já é o gatilho.
+  "voice_call.missed": CONTACT_FIELDS,
 };
 
-const OP_LABELS: Record<Op, string> = { eq: "é", neq: "não é", contains: "contém" };
+export const OP_LABELS: Record<Op, string> = {
+  eq: "é",
+  neq: "não é",
+  contains: "contém",
+  not_contains: "não contém",
+  is_empty: "está vazio",
+  is_not_empty: "está preenchido",
+  gt: "maior que",
+  gte: "maior ou igual a",
+  lt: "menor que",
+  lte: "menor ou igual a",
+  // #1749 — o operador pergunta ao EVENTO quais campos a edição mudou; o valor
+  // da condição é o NOME do campo (ex.: `expected_close_date`), nunca o valor
+  // dele. Só existe no gatilho "negócio alterado" — a porta recusa nos outros.
+  campo_alterado: "foi alterado",
+};
+
+/**
+ * Operadores que NÃO pedem valor: "está vazio" e "está preenchido" perguntam
+ * pelo campo, não por um texto. A lista é a MESMA do desenho e do avaliador
+ * (`OPERADORES_SEM_VALOR`, #2727) — enquanto cada tela tinha a sua cópia, o
+ * desenho descartava a condição `is_empty` no save e a regra ia vazia.
+ */
+const OPS_SEM_VALOR = OPERADORES_SEM_VALOR;
+
+/** Um nó de linha é uma condição de campo (tem `field`), não um grupo. */
+function ehLinha(no: ConditionNode): no is { field: string; op: Op; value: string } {
+  return typeof no === "object" && no !== null && "field" in no;
+}
 
 function emptyCondition(): ConditionRow {
   return { field: "", op: "eq", value: "" };
@@ -231,10 +318,13 @@ const QUALQUER_FONTE = "__qualquer_fonte__";
 
 export function RuleEditor({ open, onOpenChange, rule }: Props) {
   const t = useT();
+  const modulosLigados = useModulosLigados();
+  const capacidadesLigadas = useCapacidadesLigadas();
   const isEdit = !!rule;
   const [name, setName] = React.useState("");
   const [triggerEvent, setTriggerEvent] = React.useState<TriggerEvent | "">("");
   const [conditions, setConditions] = React.useState<ConditionRow[]>([]);
+  const [modoDasCondicoes, setModoDasCondicoes] = React.useState<ModoDoGrupo>("todas");
   const [advancedRows, setAdvancedRows] = React.useState<Record<number, boolean>>({});
   const [actions, setActions] = React.useState<ActionItem[]>([]);
   const [configDaData, setConfigDaData] = React.useState<ConfigDaData>({
@@ -250,6 +340,32 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
     stage_id: "",
   });
   const [webhookSourceId, setWebhookSourceId] = React.useState(QUALQUER_FONTE);
+  /**
+   * "Dias de antecedência" do aniversário (#3726), como TEXTO.
+   *
+   * Texto porque o campo vazio precisa virar `NaN` (recusado pelo schema) e não
+   * um `0` silencioso — o mesmo cuidado dos outros N da tela. `"0"` é o
+   * comportamento histórico: avisar no próprio dia.
+   */
+  const [antecedenciaDoAniversario, setAntecedenciaDoAniversario] = React.useState("0");
+  /**
+   * "No máximo uma vez por contato" (#2974), do gatilho de contato novo.
+   *
+   * A opção é gravada LIGADA ou DESLIGADA (o schema recusa qualquer outra
+   * coisa), então o estado é booleano e o `false` também vai para a API: sem
+   * isso o `merge` do `configAoSalvarDaTela` faria um `true` guardado
+   * sobreviver, e o operador não conseguiria desligar.
+   */
+  const [umaVezPorContato, setUmaVezPorContato] = React.useState(false);
+  /**
+   * "Não repetir para o mesmo contato por N horas" (#2974, fatia 2), como TEXTO.
+   *
+   * Texto porque campo vazio é "sem intervalo" — `Number("")` é `0`, que viraria
+   * "não repete por zero hora" (ou seja, nada). O mesmo cuidado dos outros N da
+   * tela. A régua de leitura/gravação mora em `lib/automation/limite-por-contato`
+   * para a gaveta e o desenho não divergirem.
+   */
+  const [repetirAposHoras, setRepetirAposHoras] = React.useState("");
 
   const create = useCreateAutomationRule();
   const update = useUpdateAutomationRule();
@@ -258,10 +374,6 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
   const { data: pipelinesRes } = usePipelines();
   const { data: sourcesRes } = useWebhookSources();
   const webhookSources = sourcesRes?.data ?? [];
-  const defaultPipeline =
-    pipelinesRes?.data?.find((p) => p.is_default) ?? pipelinesRes?.data?.[0] ?? null;
-  const { data: boardRes } = usePipelineStages(defaultPipeline?.id ?? null);
-  const stages = boardRes?.data?.stages ?? [];
   // As etapas do funil escolhido no bloco de TEMPO (#2483): segundo consumidor
   // do MESMO hook, com o funil do formulário em vez do padrão.
   const { data: boardDoTempo } = usePipelineStages(configDoTempo.pipeline_id || null);
@@ -271,13 +383,31 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
     if (!open) return;
     setName(rule?.name ?? "");
     setTriggerEvent((rule?.trigger_event as TriggerEvent) ?? "");
+    // O guardado é a lista simples (formato antigo, ≡ "todas") ou um grupo
+    // `{all|any}` (§#2727). A tela lê o grupo do TOPO; um grupo aninhado dentro
+    // dele é do modelo, não desta tela, e não é desenhado aqui.
+    const guardadas: Conditions = rule?.conditions ?? [];
+    const listaDoTopo = Array.isArray(guardadas) ? guardadas : (guardadas.any ?? guardadas.all ?? []);
+    setModoDasCondicoes(!Array.isArray(guardadas) && Array.isArray(guardadas.any) ? "qualquer" : "todas");
     setConditions(
-      rule?.conditions.map((c) => ({ field: c.field, op: c.op, value: c.value })) ?? [],
+      listaDoTopo
+        .filter(ehLinha)
+        .map((c) => ({ field: c.field, op: c.op as Op, value: c.value })),
     );
     setAdvancedRows({});
     setActions((rule?.actions as ActionItem[] | undefined) ?? []);
     const sourceId = rule?.trigger_config?.webhook_source_id;
     setWebhookSourceId(typeof sourceId === "string" ? sourceId : QUALQUER_FONTE);
+    setUmaVezPorContato(rule?.trigger_config?.uma_vez_por_contato === true);
+    // O intervalo pela MESMA régua do motor: valor guardado fora de 1..720 abre
+    // como vazio, em vez de a tela mostrar um N que o motor não vai respeitar.
+    const horas = horasDoIntervaloNaConfig(rule?.trigger_config);
+    setRepetirAposHoras(horas === null ? "" : String(horas));
+    // #3726 — o leitor é o MESMO da varredura. Regra antiga (sem a chave) abre
+    // com 0, que é o comportamento que ela já tem no banco.
+    setAntecedenciaDoAniversario(
+      String(configDoAniversario(rule?.trigger_config)?.dias_antecedencia ?? 0),
+    );
     // A configuração salva volta pelo MESMO leitor que a varredura usa: se ela
     // não reconhece o que está guardado, a tela não inventa nada e o operador
     // reescolhe — em vez de a tela mostrar um funil que o cron ignora.
@@ -305,14 +435,20 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
     });
   }, [open, rule]);
 
-  const curatedFields = triggerEvent ? CURATED_FIELDS[triggerEvent] : [];
+  // As duas condições do contato valem em QUALQUER gatilho: elas perguntam pelo
+  // contato do evento, não pelo evento. Por isso entram depois das do gatilho,
+  // e não na tabela de cada um (que é por tipo de evento).
+  const curatedFields: CuratedField[] = triggerEvent
+    ? [...CURATED_FIELDS[triggerEvent], ...CONDICOES_DO_CONTATO]
+    : [];
   const ehGatilhoDeData = triggerEvent === GATILHO_DE_DATA_DO_FUNIL;
   const ehGatilhoDeTempo =
     triggerEvent === GATILHO_SILENCIO || triggerEvent === GATILHO_ETAPA_PARADA;
   const ehGatilhoDeNovoContato = triggerEvent === "lead.created";
-  const camposDeData = camposDoFunil(
+  const ehGatilhoDoAniversario = triggerEvent === "contact.birthday";
+  const camposDeData = camposDeDataDoNegocio(
     (pipelinesRes?.data ?? []).find((p) => p.id === configDaData.pipeline_id)?.settings ?? null,
-  ).filter((campo) => campo.type === "date");
+  );
 
   const updateCondition = (idx: number, patch: Partial<ConditionRow>) => {
     setConditions((prev) => prev.map((c, i) => (i === idx ? { ...c, ...patch } : c)));
@@ -352,9 +488,21 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
     const payload = {
       name,
       trigger_event: triggerEvent,
-      conditions: conditions
-        .filter((c) => c.field.trim() && c.value.trim())
-        .map((c) => ({ field: c.field.trim(), op: c.op, value: c.value.trim() })),
+      // Serializa o grupo do topo: "todas" ⇒ a lista simples (formato antigo,
+      // compatível) e "qualquer" ⇒ `{any:[…]}`. Operador sem valor não exige o
+      // campo de valor. Regra sem condição nenhuma vai como `[]` nos dois modos.
+      conditions: (() => {
+        const linhas = conditions
+          .filter((c) => c.field.trim() && (OPS_SEM_VALOR.has(c.op) || c.value.trim()))
+          .map((c) => ({
+            field: c.field.trim(),
+            op: c.op,
+            value: OPS_SEM_VALOR.has(c.op) ? "" : c.value.trim(),
+          }));
+        const resultado: Conditions =
+          linhas.length === 0 || modoDasCondicoes === "todas" ? linhas : { any: linhas };
+        return resultado;
+      })(),
       actions,
       // `Number("")` é 0 — o que gravaria "avisar no dia" para quem não
       // digitou nada. O campo vazio vira `NaN`, que o schema recusa com a
@@ -395,15 +543,57 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
               },
             })
           : ehGatilhoDeNovoContato
-            ? configAoSalvarDaTela({
+            ? (() => {
+                // Trilha idêntica à de `triggerConfigDaTela` (o desenho): o N vai
+                // pela régua compartilhada, e "sem intervalo" APAGA a chave
+                // depois do merge — omitir deixaria um `repetir_apos_horas`
+                // guardado para sempre, e o operador não teria como desligar.
+                const horas = horasDoIntervaloDaTela(repetirAposHoras, umaVezPorContato);
+                const config = configAoSalvarDaTela({
+                  gatilhoDaRegra: rule?.trigger_event,
+                  configDaRegra: rule?.trigger_config,
+                  gatilhoDaTela: triggerEvent,
+                  configDaTela: {
+                    webhook_source_id: webhookSourceId === QUALQUER_FONTE ? null : webhookSourceId,
+                    // Ligado OU desligado, sempre gravado (#2974): omitir o
+                    // `false` faria o merge abaixo manter um `true` guardado e a
+                    // opção não poderia ser desligada pela tela.
+                    uma_vez_por_contato: umaVezPorContato,
+                    ...(horas !== null ? { repetir_apos_horas: horas } : {}),
+                  },
+                });
+                if (horas === null) delete config.repetir_apos_horas;
+                return config;
+              })()
+            : ehGatilhoDoAniversario
+              ? configAoSalvarDaTela({
+                  gatilhoDaRegra: rule?.trigger_event,
+                  configDaRegra: rule?.trigger_config,
+                  gatilhoDaTela: triggerEvent,
+                  configDaTela: {
+                    // #3726 — o N de antecedência é a ÚNICA configuração deste
+                    // gatilho. Campo vazio vira NaN, que o safeParse desta tela
+                    // recusa antes de qualquer envio, em vez de gravar 0 calado.
+                    // Pela API é outra conta: `null` NÃO é recusado — o
+                    // `configDoAniversario` o lê como 0 (no dia).
+                    dias_antecedencia:
+                      antecedenciaDoAniversario.trim() === ""
+                        ? Number.NaN
+                        : Number(antecedenciaDoAniversario),
+                  },
+                })
+              : // Gatilho sem configuração própria: `configDaTela` vazio devolve o
+              // que está guardado quando o gatilho não mudou — é assim que uma
+              // opção gravada pela API (o "uma vez por contato", #2974, cujo
+              // controle só é desenhado no gatilho de contato novo) sobrevive a
+              // abrir e salvar nesta gaveta em vez de sumir. Trocando o gatilho,
+              // o resultado é `{}`, como sempre foi.
+              configAoSalvarDaTela({
                 gatilhoDaRegra: rule?.trigger_event,
                 configDaRegra: rule?.trigger_config,
                 gatilhoDaTela: triggerEvent,
-                configDaTela: {
-                  webhook_source_id: webhookSourceId === QUALQUER_FONTE ? null : webhookSourceId,
-                },
-              })
-            : {},
+                configDaTela: {},
+              }),
     };
     const parsed = createAutomationRuleSchema.safeParse(payload);
     if (!parsed.success) {
@@ -455,6 +645,7 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
               onValueChange={(v) => {
                 setTriggerEvent(v as TriggerEvent);
                 setConditions([]);
+                setModoDasCondicoes("todas");
                 setAdvancedRows({});
                 if (v !== "lead.created") setWebhookSourceId(QUALQUER_FONTE);
               }}
@@ -463,7 +654,7 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
                 <SelectValue placeholder={t("Escolha o gatilho")} />
               </SelectTrigger>
               <SelectContent>
-                {TRIGGER_EVENTS.map((ev) => (
+                {TRIGGER_EVENTS.filter((ev) => gatilhoOferecido(ev, capacidadesLigadas, triggerEvent)).map((ev) => (
                   <SelectItem key={ev} value={ev}>
                     {t(TRIGGER_LABELS[ev])}
                   </SelectItem>
@@ -491,11 +682,76 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
                 <p className="text-xs text-muted-foreground">
                   {t("Escolha uma fonte para limitar esta automação a um formulário. Qualquer fonte mantém o comportamento geral.")}
                 </p>
+                {/* #2974 — o limite por contato. Fica no gatilho de contato novo,
+                    que é o caso relatado (o lead volta pelo mesmo anúncio e
+                    recebia a sequência inteira outra vez). */}
+                <label className="mt-3 flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={umaVezPorContato}
+                    onChange={(e) => setUmaVezPorContato(e.target.checked)}
+                  />
+                  {t("Rodar no máximo uma vez por contato")}
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  {t("Ligado, esta automação roda uma única vez para cada contato: se ele voltar pelo mesmo anúncio, a sequência não repete. A execução fica registrada na aba Atividade, e a próxima entrada deste contato só registra que a regra foi pulada.")}
+                </p>
+                {/* #2974, fatia 2 — o intervalo mínimo. Fica AO LADO do
+                    checkbox, e não numa terceira opção: são o mesmo limite por
+                    contato, com duas respostas possíveis para "quando pode de
+                    novo". Desabilitado com "uma vez" ligado porque as duas não
+                    convivem pela tela. */}
+                <div className="mt-3 space-y-1">
+                  <Label htmlFor="repetir-apos-horas">
+                    {t("Não repetir para o mesmo contato por (horas)")}
+                  </Label>
+                  <Input
+                    id="repetir-apos-horas"
+                    type="number"
+                    inputMode="numeric"
+                    className="w-40"
+                    value={repetirAposHoras}
+                    min={INTERVALO_POR_CONTATO_MIN_HORAS}
+                    max={INTERVALO_POR_CONTATO_MAX_HORAS}
+                    disabled={umaVezPorContato}
+                    onChange={(e) => setRepetirAposHoras(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {umaVezPorContato
+                      ? t("Desligue “rodar no máximo uma vez por contato” para usar um intervalo.")
+                      : t("Deixe vazio para não ter intervalo. Com um número, a automação não repete para o mesmo contato antes de passar esse tanto de horas (1 a 720, ou seja até 30 dias). O contador é por contato e por automação, e sobrevive a reinício.")}
+                  </p>
+                </div>
               </div>
             ) : null}
 
-            {/* O gatilho de DATA só sabe onde olhar se a regra disser o funil e o
-                campo: o campo de data pertence a UM funil. Sem esta escolha a
+            {/* #3726 — o aniversário pode avisar ANTES do dia. O 0 é o
+                comportamento histórico (no próprio dia, às 9h locais) e é o que
+                toda regra gravada antes desta versão tem no banco. */}
+            {ehGatilhoDoAniversario ? (
+              <div className="space-y-2 rounded-sm border border-border p-3">
+                <div className="w-40 space-y-1">
+                  <Label htmlFor="dias-de-antecedencia">{t("Dias de antecedência")}</Label>
+                  <Input
+                    id="dias-de-antecedencia"
+                    type="number"
+                    inputMode="numeric"
+                    value={antecedenciaDoAniversario}
+                    min={0}
+                    max={DIAS_DE_ANTECEDENCIA_MAX}
+                    onChange={(e) => setAntecedenciaDoAniversario(e.target.value)}
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {t(
+                    "O aviso sai N dias antes da data de nascimento, sempre às 9h no fuso da organização. Deixe 0 para avisar no próprio dia. Cada contato recebe um aviso por ano, por automação.",
+                  )}
+                </p>
+              </div>
+            ) : null}
+
+            {/* O gatilho de DATA só sabe onde olhar se a regra disser o funil e
+                o campo: o campo de data pertence a UM funil. Sem esta escolha a
                 regra é salva e nunca dispara — por isso o schema da API também
                 a recusa. */}
             {ehGatilhoDeData ? (
@@ -720,6 +976,27 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
 
           <section className="space-y-3">
             <h3 className="text-lg font-semibold text-text">{t("SE (opcional)")}</h3>
+            {/* #2727 — o grupo do TOPO: "todas" combina por E (a lista simples,
+                o formato de sempre) e "qualquer uma" grava `{any:[…]}`. */}
+            {conditions.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Label className="text-sm text-muted-foreground">
+                  {t("Combinar as condições por")}
+                </Label>
+                <Select
+                  value={modoDasCondicoes}
+                  onValueChange={(v) => setModoDasCondicoes(v as ModoDoGrupo)}
+                >
+                  <SelectTrigger className="w-56">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="todas">{t("Todas as condições")}</SelectItem>
+                    <SelectItem value="qualquer">{t("Qualquer uma das condições")}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
             {conditions.map((cond, idx) => {
               // Linha nova (campo vazio) começa no modo curado — o avançado é
               // escape p/ quem sabe o path; só cai nele sozinho ao EDITAR uma
@@ -743,7 +1020,16 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
                         value={cond.field}
                         onValueChange={(v) => {
                           const f = curatedFields.find((cf) => cf.value === v);
-                          updateCondition(idx, { field: v, op: f?.op ?? "eq" });
+                          // Condição do contato nasce com um valor que a porta
+                          // aceita ("sim"), senão a linha recém-escolhida seria
+                          // recusada por "escolha sim ou não" antes de a pessoa
+                          // tocar no campo de valor.
+                          const padrao = valorPadraoDoCampo(v, cond.value);
+                          updateCondition(idx, {
+                            field: v,
+                            op: f?.op ?? "eq",
+                            ...(padrao === null ? {} : { value: padrao }),
+                          });
                         }}
                       >
                         <SelectTrigger className="flex-1 basis-40">
@@ -762,11 +1048,13 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
                       value={cond.op}
                       onValueChange={(v) => updateCondition(idx, { op: v as Op })}
                     >
-                      <SelectTrigger className="w-28">
+                      <SelectTrigger className="w-40">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {(Object.keys(OP_LABELS) as Op[]).map((op) => (
+                        {(Object.keys(OP_LABELS) as Op[])
+                          .filter((op) => operadorCabeNoCampo(op, cond.field))
+                          .map((op) => (
                           <SelectItem key={op} value={op}>
                             {/* Em campo de lista, `contains` é pertinência: o
                                 rótulo diz o que o motor faz. No modo avançado
@@ -777,18 +1065,26 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
                         ))}
                       </SelectContent>
                     </Select>
-                    {curated?.kind === "stage" ? (
-                      <Select
+                    {OPS_SEM_VALOR.has(cond.op) ? null : curated?.kind === "stage" ? (
+                      <EtapaDeQualquerFunil
                         value={cond.value}
-                        onValueChange={(v) => updateCondition(idx, { value: v })}
-                      >
-                        <SelectTrigger className="flex-1 basis-40">
-                          <SelectValue placeholder={t("Etapa")} />
+                        onChange={(v) => updateCondition(idx, { value: v })}
+                      />
+                    ) : curated?.kind === "sim_nao" ? (
+                      <ValorDaCondicaoDoContato
+                        campo={cond.field}
+                        valor={cond.value}
+                        onChange={(v) => updateCondition(idx, { value: v })}
+                      />
+                    ) : cond.op === "campo_alterado" ? (
+                      <Select value={cond.value} onValueChange={(v) => updateCondition(idx, { value: v })}>
+                        <SelectTrigger className="flex-1 basis-40" aria-label={t("Campo do negócio")}>
+                          <SelectValue placeholder={t("Escolha o campo")} />
                         </SelectTrigger>
                         <SelectContent>
-                          {stages.map((s) => (
-                            <SelectItem key={s.id} value={s.id}>
-                              {s.name}
+                          {Object.keys(CAMPOS_ALTERAVEIS_DO_NEGOCIO).map((nome) => (
+                            <SelectItem key={nome} value={nome}>
+                              {t(rotuloDoCampoAlterado(nome))}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -892,6 +1188,7 @@ export function RuleEditor({ open, onOpenChange, rule }: Props) {
                     as ações que regravam o lead: fechariam laço (#1528). */}
                 {(Object.keys(ACTION_LABELS) as ActionType[])
                   .filter((actionType) => !acoesQueFechamLaco(triggerEvent, [{ type: actionType }]).length)
+                  .filter((actionType) => acaoOferecida(actionType, modulosLigados))
                   .map((actionType) => (
                     <SelectItem key={actionType} value={actionType}>
                       {t(ACTION_LABELS[actionType])}

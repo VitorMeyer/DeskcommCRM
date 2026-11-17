@@ -26,9 +26,11 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useT } from "@/hooks/i18n/useT";
+import { diaDeHojeLocal } from "@/lib/ai/pacing-knobs";
 import { apiClient } from "@/lib/api/client";
 import type { ApiSuccess } from "@/lib/api/wrappers";
 import { rotuloDoContato } from "@/lib/contacts/rotulo-do-contato";
+import { filtrarNegocios } from "@/lib/propostas/filtrar-negocios";
 
 export interface LeadOption {
   id: string;
@@ -47,6 +49,18 @@ interface NewProposalClientProps {
   preselectedLeadId?: string;
 }
 
+/**
+ * A validade padrão de uma proposta: HOJE + 15 dias, contando no calendário de
+ * quem usa a tela (#2935). A soma acontece em data LOCAL e só então é
+ * formatada; `toISOString()` convertia para UTC e, depois das 21h em Brasília,
+ * o "hoje + 15" saía com 16 dias.
+ */
+export function validadePadrao(agora: Date = new Date()): string {
+  const d = new Date(agora);
+  d.setDate(d.getDate() + 15);
+  return diaDeHojeLocal(d);
+}
+
 export function NewProposalClient({
   initialLeads,
   preselectedLeadId,
@@ -54,12 +68,8 @@ export function NewProposalClient({
   const t = useT();
   const router = useRouter();
 
-  // Data default: 15 dias no futuro
-  const dataValidadePadrao = useMemo(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 15);
-    return d.toISOString().slice(0, 10);
-  }, []);
+  // Data default: 15 dias no futuro, no calendário de quem usa a tela (#2935).
+  const dataValidadePadrao = useMemo(() => validadePadrao(), []);
 
   const [leadId, setLeadId] = useState<string>(() => {
     if (preselectedLeadId && initialLeads.some((l) => l.id === preselectedLeadId)) {
@@ -73,22 +83,11 @@ export function NewProposalClient({
   const [condicoes, setCondicoes] = useState("");
   const [criando, setCriando] = useState(false);
 
-  // Filtro de leads para facilitar busca caso haja muitos negócios
-  const leadsFiltrados = useMemo(() => {
-    const termo = buscaLead.trim().toLowerCase();
-    if (!termo) return initialLeads;
-    return initialLeads.filter((l) => {
-      const leadTitle = (l.title ?? "").toLowerCase();
-      // Nome único da função central: remontar a cadeia aqui vira a sétima cópia.
-      const contactRotulo = rotuloDoContato(l.contact).toLowerCase();
-      const contactPhone = (l.contact?.phone_number ?? "").toLowerCase();
-      return (
-        leadTitle.includes(termo) ||
-        contactRotulo.includes(termo) ||
-        contactPhone.includes(termo)
-      );
-    });
-  }, [initialLeads, buscaLead]);
+  // Filtro de leads para facilitar busca caso haja muitos negócios (sem acento, #4413)
+  const leadsFiltrados = useMemo(
+    () => filtrarNegocios(initialLeads, buscaLead),
+    [initialLeads, buscaLead],
+  );
 
   function getLeadLabel(lead: LeadOption): string {
     const nomeContato = rotuloDoContato(lead.contact);

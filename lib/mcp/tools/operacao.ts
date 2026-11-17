@@ -42,7 +42,7 @@ import {
   type DepsDaOperacao,
 } from "@/lib/operacao/entradas-automaticas";
 import { listarMarcadores, listarTime } from "@/lib/operacao/marcadores-e-time";
-import { resolveUserNames } from "./_users";
+import { nomesDosAtendentesCom } from "@/lib/users/nome-do-atendente";
 import {
   CHAVE_DE_VALOR_MAX,
   VALOR_DE_VARIAVEL_MAX,
@@ -81,7 +81,9 @@ export const crmListStages: McpToolDefinition<typeof listStagesShape> = {
     "Lista as etapas ativas de um pipeline, na ordem do quadro, com id, name, slug, position, " +
     "is_won/is_lost, win_probability (probabilidade de ganho 0-100 ou null quando a etapa nao foi " +
     "calibrada), expected_duration_hours (janela de esfriando em HORAS, ou null quando a etapa " +
-    "usa o padrao de 24 h) e a autoria da última mudança de configuração (last_change_actor_kind: user|ai|system). " +
+    "usa o padrao de 24 h), description (o criterio da etapa: quando um card entra nela, ou null), agent_stage_hint (a que passo do funil do agente a etapa corresponde: " +
+    "new|contacted|qualifying|qualified|negotiating|won|lost, ou null quando nao ha equivalente) e a " +
+    "autoria da última mudança de configuração (last_change_actor_kind: user|ai|system). " +
     "Use antes de mover um lead ou de criar etapa nova, para não duplicar coluna existente.",
   inputSchema: listStagesShape,
   category: "read",
@@ -543,8 +545,9 @@ export const crmListTeamMembers: McpToolDefinition<typeof listTeamShape> = {
     const time = await listarTime(deps(ctx));
     // Nome sem UUID na ponta (issue #1539): a mesma resolução de `nome` da
     // `crm_list_available_attendants`, pelo helper que expõe SÓ full_name.
-    const nomes = await resolveUserNames(
+    const nomes = await nomesDosAtendentesCom(
       ctx.supabase,
+      ctx.organizationId,
       time.map((p) => p.user_id),
     );
     return { time: time.map((p) => ({ ...p, nome: nomes.get(p.user_id) ?? null })) };

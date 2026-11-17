@@ -138,6 +138,9 @@ describe("só as superfícies de CHAVE pedem a união", () => {
     "lib/ai/log-invocation.ts", // grava o provedor da chamada, inclusive o Jev
     "lib/ai/decisao/credencial.ts", // qual chave do Jev está em uso
     "app/api/v1/ai/jev/route.ts", // o cartão do próprio Jev
+    // o cartão do Jev escolhe o PROVEDOR da chave que será cadastrada (OpenRouter
+    // × TypeSafe) — chave, nunca modelo de conversa
+    "app/app/ai/providers/_components/CartaoDoJev.tsx",
     "app/api/v1/ai/credentials/route.ts", // cadastra a chave
     "hooks/ai/useCredentials.ts", // tipo da LINHA de credencial
     "app/api/v1/ai/credentials/[id]/route.ts", // gira a chave (o provedor não muda)
@@ -148,6 +151,9 @@ describe("só as superfícies de CHAVE pedem a união", () => {
     "app/app/ai/credentials/_components/CredentialCard.tsx",
     "app/app/ai/credentials/_components/CredentialsList.tsx",
     "app/app/ai/credentials/_components/RotateCredentialDialog.tsx",
+    // a cláusula 9 lista os SUBOPERADORES com chave ativa (o Jev recebe cada
+    // mensagem); nunca escolhe modelo de conversa
+    "lib/legal/operador.ts",
   ].sort();
 
   const usam = arquivosDeCodigo(["app", "lib", "components", "hooks", "workers"])

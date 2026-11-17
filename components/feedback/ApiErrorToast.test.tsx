@@ -94,6 +94,13 @@ describe("ApiErrorToast", () => {
     expect(toast.warning).toHaveBeenCalledTimes(1);
   });
 
+  it("empresa sem administrador com e-mail no link do dono é AVISO, com a frase da rota", () => {
+    const frase = "A empresa ainda não tem administrador com e-mail. Gere o link depois que um convite de administrador for aceito.";
+    showApiError(new ApiError(409, "empresa_sem_email", undefined, "req-d15", frase));
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast.warning).toHaveBeenCalledWith(frase, expect.objectContaining({ description: "ID: req-d15" }));
+  });
+
   it("falls back to toast.error for unknown ApiError code", () => {
     const err = new ApiError(418, "unknown_teapot_code", undefined, "req-2", "I'm a teapot");
     showApiError(err);
@@ -107,6 +114,26 @@ describe("ApiErrorToast", () => {
   it("calls toast.error with generic message for non-ApiError", () => {
     showApiError(new Error("oops"));
     expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(toast.error).toHaveBeenCalledWith("Erro inesperado. Tente novamente.");
+  });
+
+  // #3971: o fallback era o único aviso que saía SEM ID, mesmo quando o erro
+  // trazia um. Quem pede ajuda lê o toast; se o ID existe, tem de estar ali.
+  it("mostra o ID no fallback genérico quando o erro traz requestId", () => {
+    showApiError(Object.assign(new Error("falha de rede"), { requestId: "req-3971-fallback" }));
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(toast.error).toHaveBeenCalledWith("Erro inesperado. Tente novamente.", {
+      description: "ID: req-3971-fallback",
+    });
+  });
+
+  it("fallback continua sem descrição quando não há requestId (inclusive vazio)", () => {
+    showApiError({ requestId: "" });
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect(toast.error).toHaveBeenCalledWith("Erro inesperado. Tente novamente.");
+
+    vi.mocked(toast.error).mockClear();
+    showApiError(null);
     expect(toast.error).toHaveBeenCalledWith("Erro inesperado. Tente novamente.");
   });
 });

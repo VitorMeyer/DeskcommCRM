@@ -1,16 +1,20 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type * as RequestIdLogado from "@/lib/log/request-id-logado";
 import { argumentos, bancoFalso, filtros, operacao, type BancoFalso, type Cadeia, type Resposta } from "@/tests/helpers/banco-falso-da-cobranca";
 
 const h = vi.hoisted(() => ({
   papel: vi.fn(),
   ligada: true,
   provedor: "stripe" as string | null,
-  ad: { lerSituacao: vi.fn(), garantirCliente: vi.fn(), iniciarAssinatura: vi.fn() },
+  ad: { lerSituacao: vi.fn(), garantirCliente: vi.fn(), iniciarAssinatura: vi.fn(), lerPagamentoProporcional: vi.fn(), expirarSessao: vi.fn() },
+  emailDoAdmin: vi.fn(),
   taxaOk: true,
   audit: vi.fn(),
   logError: vi.fn(),
+  logWarn: vi.fn(),
+  intencao: vi.fn(),
   banco: undefined as unknown as BancoFalso,
 }));
 vi.mock("@/lib/auth/require-role", () => ({ requireRole: h.papel }));
@@ -18,10 +22,22 @@ vi.mock("@/lib/instalacao/modulos", () => ({ moduloLigado: async () => h.ligada 
 vi.mock("@/lib/cobranca/configuracao", () => ({ provedorDaInstalacao: async () => h.provedor }));
 vi.mock("@/lib/cobranca/provedores", () => ({ adaptador: () => h.ad, modoDoProvedor: async () => "teste" }));
 vi.mock("@/lib/audit", () => ({ audit: h.audit }));
-vi.mock("@/lib/logger", () => ({ logger: { error: h.logError, warn: vi.fn(), info: vi.fn(), debug: vi.fn() } }));
+// O dublê registra o requestId como o logger real faz (lib/logger.ts): sem isso o
+// fail() não sabe que a rota já logou e grava uma 2ª linha que em produção não existe.
+vi.mock("@/lib/logger", async () => {
+  const { registrarRequestIdLogado } = await vi.importActual<typeof RequestIdLogado>("@/lib/log/request-id-logado");
+  return {
+    logger: {
+      error: (...args: [string, Record<string, unknown>?]) => { registrarRequestIdLogado(args[1]); h.logError(...args); },
+      warn: h.logWarn, info: vi.fn(), debug: vi.fn(),
+    },
+  };
+});
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => h.banco.cliente }));
 vi.mock("@/lib/impersonate/support", () => ({ requireSupportWrite: async () => null }));
 vi.mock("@/lib/ai/dispatcher/rate-limit", () => ({ checkRateLimit: async () => ({ allowed: h.taxaOk }) }));
+vi.mock("@/lib/cobranca/emails", () => ({ emailDoAdminDaEmpresa: h.emailDoAdmin }));
+vi.mock("@/lib/cobranca/contratacao", () => ({ lerIntencaoDeContratacao: h.intencao }));
 
 import { ErroDoProvedor } from "@/lib/cobranca/provedores/contrato";
 
@@ -29,6 +45,7 @@ import { POST } from "./route";
 
 const ORG = "ffffffff-0000-4000-8000-000000000001";
 const CHAVE = "3f1c2d4e-0000-4000-8000-000000000001";
+const NONCE = "9a8b7c6d-0000-4000-8000-000000000002";
 const EM_TESTE = {
   plano_id: "plano-a", estado: "trial", trial_ate: "2026-10-20T00:00:00.000Z", provedor: null, provedor_cliente_id: null,
   checkout_url: null, checkout_expira_em: null,
@@ -60,16 +77,61 @@ const lerAssinatura = () => h.banco.cadeias.filter((c) => c.tabela === "cobranca
 beforeEach(() => {
   vi.clearAllMocks();
   h.ligada = true;
+  h.intencao.mockResolvedValue(null);
   h.provedor = "stripe";
   h.taxaOk = true;
   m = { linha: { ...EM_TESTE }, reservaOk: true };
   h.banco = bancoFalso(responder);
   h.papel.mockResolvedValue({ ok: true, user: { id: "admin-1", email: "admin@loja.com" }, org: { orgId: ORG } });
   h.ad.garantirCliente.mockResolvedValue("cus_novo");
+  h.emailDoAdmin.mockResolvedValue("ana@loja.com");
   h.ad.iniciarAssinatura.mockResolvedValue({ url: "https://checkout.stripe.com/c/pay/cs_1", expiraEm: new Date("2026-10-11T12:00:00Z"), assinaturaRef: null });
 });
 
 describe("checkout da assinatura", () => {
+  it("continuação automática revalida intenção e usa a chave do clique, nunca o nonce da intenção", async () => {
+    h.intencao.mockResolvedValue({ id: NONCE, planoId: "plano-a" });
+    expect((await assinar({ continuar_cadastro: true, volta: "contratacao" })).status).toBe(200);
+    expect(h.intencao).toHaveBeenCalledWith(h.banco.cliente, "admin-1", ORG);
+    expect(h.ad.iniciarAssinatura).toHaveBeenCalledWith(expect.objectContaining({ chaveIdempotencia: CHAVE, urlDeVolta: expect.stringMatching(/para=contratacao$/) }));
+  });
+  it("continuação automática sem Idempotency-Key gera chave nova, não o nonce da intenção", async () => {
+    h.intencao.mockResolvedValue({ id: NONCE, planoId: "plano-a" });
+    const res = await POST(new NextRequest("http://localhost/api/v1/cobranca/assinatura/checkout", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ continuar_cadastro: true }),
+    }));
+    expect(res.status).toBe(200);
+    const chave = (h.ad.iniciarAssinatura.mock.calls[0]![0] as { chaveIdempotencia: string }).chaveIdempotencia;
+    expect(chave).toMatch(/^[0-9a-f-]{36}$/);
+    expect(chave).not.toBe(NONCE);
+  });
+  it("sem prova de intenção não reserva nem chama gateway automaticamente", async () => {
+    expect((await assinar({ continuar_cadastro: true })).status).toBe(409);
+    expect(updates()).toEqual([]);
+    expect(h.ad.iniciarAssinatura).not.toHaveBeenCalled();
+  });
+  it("plano diferente do compromisso autenticado recusa antes da reserva e do provedor", async () => {
+    h.intencao.mockResolvedValue({ id: CHAVE, planoId: "plano-escolhido" });
+    expect((await codigo(await assinar({ continuar_cadastro: true }))).code).toBe("state_conflict");
+    expect(updates()).toEqual([]);
+    expect(h.ad.garantirCliente).not.toHaveBeenCalled();
+    expect(h.ad.iniciarAssinatura).not.toHaveBeenCalled();
+  });
+  it("a reserva exige o mesmo plano lido; concorrência perdedora não chega ao gateway", async () => {
+    h.intencao.mockResolvedValue({ id: CHAVE, planoId: "plano-a" });
+    m.reservaOk = false;
+    expect((await codigo(await assinar({ continuar_cadastro: true }))).code).toBe("checkout_em_preparo");
+    const reserva = lerAssinatura().find((c) => operacao(c) === "update" && filtros(c).some((f) => f[0] === "or"));
+    expect(reserva).toBeDefined();
+    expect(filtros(reserva!)).toContainEqual(["eq", "plano_id", "plano-a"]);
+    expect(h.ad.iniciarAssinatura).not.toHaveBeenCalled();
+  });
+  it("intenção ilegível é erro recuperável e não executa cobrança", async () => {
+    h.intencao.mockRejectedValue(new Error("rede"));
+    expect((await assinar({ continuar_cadastro: true })).status).toBe(503);
+    expect(updates()).toEqual([]);
+    expect(h.logWarn).toHaveBeenCalledWith("cobranca.checkout.intencao_indisponivel", expect.objectContaining({ organizationId: ORG, erro: "rede" }));
+  });
   it("chave desligada: 404; empresa isenta: 404; nenhum provedor conectado: 409 com frase para leigo", async () => {
     h.ligada = false;
     expect((await assinar()).status).toBe(404);
@@ -94,12 +156,12 @@ describe("checkout da assinatura", () => {
     expect(h.ad.garantirCliente).not.toHaveBeenCalled();
   });
 
-  it("⭐ caminho feliz: reserva, cliente com o nome legal e o e-mail de quem clicou, checkout com o teste grátis, e grava o link", async () => {
+  it("⭐ caminho feliz: reserva, cliente com o nome legal e o e-mail do admin da empresa, checkout com o teste grátis, e grava o link", async () => {
     const res = await assinar();
     expect((await res.json()).data).toEqual({ url: "https://checkout.stripe.com/c/pay/cs_1" });
     const [reserva, gravacao] = updates();
     expect(reserva).toMatchObject({ checkout_url: null });
-    expect(h.ad.garantirCliente).toHaveBeenCalledWith({ id: ORG, nome: "Loja Legal Ltda", email: "admin@loja.com", documento: null });
+    expect(h.ad.garantirCliente).toHaveBeenCalledWith({ id: ORG, nome: "Loja Legal Ltda", email: "ana@loja.com", documento: null });
     const pedido = h.ad.iniciarAssinatura.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(pedido).toMatchObject({ clienteRef: "cus_novo", orgId: ORG, chaveIdempotencia: CHAVE, trialAte: new Date("2026-10-20T00:00:00.000Z") });
     expect(String(pedido.urlDeVolta)).toMatch(/\/cobranca\/volta\?para=painel$/);
@@ -150,6 +212,30 @@ describe("checkout da assinatura", () => {
     h.ad.garantirCliente.mockRejectedValue(new ErroDoProvedor(400, "parameter_invalid", false));
     expect((await assinar()).status).toBe(502);
   });
+
+  it("correlaciona a recusa com HTTP e código sem despejar corpo ou segredo", async () => {
+    const erro = new ErroDoProvedor(400, "invalid_callback", false);
+    Object.assign(erro, { response: { description: "segredo-fixture", url: "https://fixture.invalid/?token=segredo-fixture" } });
+    h.ad.iniciarAssinatura.mockRejectedValue(erro);
+    const res = await assinar();
+    expect(res.status).toBe(502);
+    expect(h.logWarn).toHaveBeenCalledWith("cobranca: checkout recusado pelo provedor", {
+      requestId: expect.any(String), organizationId: ORG, provedor: "stripe",
+      status: 400, codigo: "invalid_callback", transitorio: false,
+    });
+    expect(JSON.stringify(h.logWarn.mock.calls)).not.toContain("segredo-fixture");
+    expect(JSON.stringify(await res.json())).not.toContain("invalid_callback");
+    expect(updates().at(-1)).toEqual({ checkout_expira_em: null });
+  });
+
+  it.each(["https://fixture.invalid/?token=segredo-fixture", "$aact_hmlg_fixture", "99991111140", "fixture@example.invalid"])(
+    "não registra código do provedor com formato de dado sensível: %s", async (codigoInseguro) => {
+      h.ad.iniciarAssinatura.mockRejectedValue(new ErroDoProvedor(400, codigoInseguro, false));
+      expect((await assinar()).status).toBe(502);
+      expect(h.logWarn).toHaveBeenCalledWith("cobranca: checkout recusado pelo provedor", expect.objectContaining({ codigo: "codigo_nao_publicavel" }));
+      expect(JSON.stringify(h.logWarn.mock.calls)).not.toContain(codigoInseguro);
+    },
+  );
 
   it("reserva perdida para outro clique entre a leitura e a escrita: 409 checkout_em_preparo", async () => {
     m.reservaOk = false;
@@ -219,7 +305,7 @@ describe("checkout da assinatura pelo Asaas (PR 3b)", () => {
     h.ad.garantirCliente.mockResolvedValue("cus_asaas_1");
     const res = await assinar({ documento: "11.222.333/0001-81" });
     expect(res.status).toBe(200);
-    expect(h.ad.garantirCliente).toHaveBeenCalledWith({ id: ORG, nome: "Loja Legal Ltda", email: "admin@loja.com", documento: CNPJ });
+    expect(h.ad.garantirCliente).toHaveBeenCalledWith({ id: ORG, nome: "Loja Legal Ltda", email: "ana@loja.com", documento: CNPJ });
     expect(JSON.stringify(updates())).not.toContain(CNPJ);
     expect(JSON.stringify(h.audit.mock.calls)).not.toContain(CNPJ);
     expect(JSON.stringify(h.logError.mock.calls)).not.toContain(CNPJ);
@@ -270,5 +356,69 @@ describe("checkout da assinatura pelo Asaas (PR 3b)", () => {
     expect(res.status).toBe(422);
     expect((await codigo(res)).code).toBe("documento_recusado");
     expect(updates().at(-1)).toEqual({ checkout_expira_em: null });
+  });
+});
+
+describe("#2961: entrada paga e ajuste proporcional x o checkout cheio (as duas portas passam por gerarLinkDePagamento)", () => {
+  const AJUSTE = {
+    troca_id: "troca-1", plano_troca_pendente_id: "plano-b", troca_status: "aguardando_pagamento",
+    troca_pagamento_ref: "pay_ajuste", troca_pagamento_url: "https://sandbox.asaas.com/i/pay_ajuste",
+    troca_reserva_ate: new Date(Date.now() + 10 * 86_400_000).toISOString(),
+  };
+
+  it("⭐ ajuste aguardando com a assinatura VIVA: 409 pagamento_em_andamento, nenhum checkout cheio", async () => {
+    m.linha = { ...EM_TESTE, ...AJUSTE, estado: "ativa", trial_ate: null, provedor: "asaas", provedor_cliente_id: "cus_1" };
+    h.ad.lerSituacao.mockResolvedValue({ assinaturasVivas: 1, linkDePagamento: null });
+    expect((await codigo(await assinar())).code).toBe("sem_link_de_pagamento");
+    h.ad.lerSituacao.mockResolvedValue({ assinaturasVivas: 1, linkDePagamento: "https://sandbox.asaas.com/i/pay_mensal" });
+    expect((await codigo(await assinar())).code).toBe("pagamento_em_andamento");
+    expect(h.ad.iniciarAssinatura).not.toHaveBeenCalled();
+  });
+
+  it("⭐ entrada pendente (teste de 0 dia, sem cliente): o checkout É a entrada, e o 2º clique devolve o MESMO link", async () => {
+    const criada = new Date(Date.now() - 60_000).toISOString();
+    m.linha = { ...EM_TESTE, trial_ate: criada, pagamento_inicial_pendente: true };
+    expect((await (await assinar()).json()).data).toEqual({ url: "https://checkout.stripe.com/c/pay/cs_1" });
+    expect(h.ad.iniciarAssinatura).toHaveBeenCalledTimes(1);
+    m.linha = { ...m.linha, provedor: "stripe", provedor_cliente_id: "cus_novo", checkout_url: "https://checkout.stripe.com/c/pay/cs_1", checkout_expira_em: new Date(Date.now() + 3_600_000).toISOString() };
+    expect((await (await assinar()).json()).data).toEqual({ url: "https://checkout.stripe.com/c/pay/cs_1" });
+    expect(h.ad.iniciarAssinatura).toHaveBeenCalledTimes(1);
+  });
+
+  it("⭐ ajuste aguardando com a assinatura MORTA (Asaas cancela na hora): o ajuste morre no provedor ANTES do checkout cheio", async () => {
+    m.linha = { ...EM_TESTE, ...AJUSTE, estado: "cancelada", trial_ate: null, provedor: "asaas", provedor_cliente_id: "cus_1" };
+    h.ad.lerSituacao.mockResolvedValue({ assinaturasVivas: 0, linkDePagamento: null });
+    h.ad.lerPagamentoProporcional.mockResolvedValue("pendente");
+    h.ad.iniciarAssinatura.mockResolvedValue({ url: "https://sandbox.asaas.com/i/pay_cheio", expiraEm: null, assinaturaRef: "sub_nova" });
+    expect((await assinar()).status).toBe(200);
+    expect(h.ad.expirarSessao).toHaveBeenCalledWith("pay_ajuste");
+    const desistencia = h.banco.cadeias.find((c) => c.tabela === "cobranca_assinaturas" && operacao(c) === "update" && (argumentos(c, "update")?.[0] as Record<string, unknown>).troca_id === null)!;
+    expect(filtros(desistencia)).toContainEqual(["eq", "troca_id", "troca-1"]);
+    expect(h.ad.expirarSessao.mock.invocationCallOrder[0]!).toBeLessThan(h.ad.iniciarAssinatura.mock.invocationCallOrder[0]!);
+  });
+
+  it("⭐ ajuste já PAGO com a assinatura morta: 409 troca_pendente, nenhum checkout cheio, reserva liberada", async () => {
+    m.linha = { ...EM_TESTE, ...AJUSTE, estado: "cancelada", trial_ate: null, provedor: "asaas", provedor_cliente_id: "cus_1" };
+    h.ad.lerSituacao.mockResolvedValue({ assinaturasVivas: 0, linkDePagamento: null });
+    h.ad.lerPagamentoProporcional.mockResolvedValue("pago");
+    expect((await codigo(await assinar())).code).toBe("troca_pendente");
+    expect(h.ad.iniciarAssinatura).not.toHaveBeenCalled();
+    expect(updates().at(-1)).toEqual({ checkout_expira_em: null });
+  });
+
+  it("⭐ quem clica é o dono/provisório (empresa sem cliente no provedor): o cliente nasce com o e-mail do admin da empresa", async () => {
+    h.papel.mockResolvedValue({ ok: true, user: { id: "dono-1", email: "dono@instalacao.com" }, org: { orgId: ORG } });
+    m.linha = { ...EM_TESTE, trial_ate: new Date(Date.now() - 60_000).toISOString(), pagamento_inicial_pendente: true };
+    await assinar();
+    expect(h.ad.garantirCliente).toHaveBeenCalledWith(expect.objectContaining({ email: "ana@loja.com" }));
+  });
+
+  it("empresa só com o dono provisório (nenhum admin de verdade): 409 empresa_sem_email; admins ilegíveis: 500 sem o endereço no log", async () => {
+    h.emailDoAdmin.mockResolvedValue(null);
+    expect((await codigo(await assinar())).code).toBe("empresa_sem_email");
+    h.emailDoAdmin.mockRejectedValue(new Error("admins ilegíveis (08006)"));
+    const res = await assinar();
+    expect(res.status).toBe(500);
+    expect(h.ad.garantirCliente).not.toHaveBeenCalled();
   });
 });

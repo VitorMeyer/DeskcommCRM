@@ -9,6 +9,7 @@
  * sem I/O de propósito — a precedência entre os sinais é a parte que erra
  * sozinha, e é o que o teste prende.
  */
+import { COBERTA_PELA_NATIVA } from "@/lib/mcp/tools/ferramentas-do-harness";
 import type { ToolRisk } from "@/lib/mcp/tools/pacotes";
 
 /** Uma linha como `fn_agent_tool_usage` devolve. */
@@ -164,6 +165,15 @@ export function montarUsoDeCapacidades(input: MontarUsoInput): CapacidadeComUso[
     const total = uso?.total ?? 0;
     const falhas = uso?.falhas ?? 0;
     const emTeste = uso?.em_teste ?? 0;
+    // A capacidade que a ferramenta interna cobre sai do atendimento quando a
+    // interna está lá (`COBERTA_PELA_NATIVA`), e o uso da interna não entra nesta
+    // contagem. "Considere desligar por concorrer com as outras" seria falso; a
+    // linha fica (falhar aberto na informação) e diz o que vale nos dois casos.
+    const coberta = COBERTA_PELA_NATIVA[name];
+    const recomendacao =
+      coberta !== undefined && sinal === "nunca_usada"
+        ? coberta.nota
+        : recomendar(sinal, { total, falhas, em_teste: emTeste }, janelaEmDias);
 
     resultado.push({
       name,
@@ -178,11 +188,7 @@ export function montarUsoDeCapacidades(input: MontarUsoInput): CapacidadeComUso[
       em_teste: emTeste,
       ultima_vez: uso?.ultima_vez ?? null,
       sinal,
-      recomendacao: recomendar(
-        sinal,
-        { total, falhas, em_teste: emTeste },
-        janelaEmDias,
-      ),
+      recomendacao,
     });
   }
 
@@ -192,6 +198,59 @@ export function montarUsoDeCapacidades(input: MontarUsoInput): CapacidadeComUso[
     if (b.total !== a.total) return b.total - a.total;
     return a.rotulo.localeCompare(b.rotulo, "pt-BR");
   });
+}
+
+/** Uma linha como `fn_agent_tool_usage_por_termo` devolve. */
+export interface LinhaDeTermo {
+  tool_name: string;
+  termo: string;
+  total: number;
+  falhas: number;
+  ultima_vez: string | null;
+}
+
+/** Um termo que não achou, já pronto para a tela. */
+export interface TermoSemResultado {
+  tool_name: string;
+  termo: string;
+  total: number;
+  falhas: number;
+  /** `falhas / total`, entre 0 e 1 — separa "termo difícil" de "não existe". */
+  taxa_de_falha: number;
+  ultima_vez: string | null;
+}
+
+/**
+ * Os termos que NÃO acharam — a lista de compras do dono da loja (#484, caminho 2).
+ *
+ * `fn_agent_tool_usage` diz "quantas falhas"; isto diz QUAL termo falha, e com
+ * que frequência. Só entra termo que falhou alguma vez: um termo que sempre acha
+ * é sucesso e não pede ação nenhuma. A ordem é por número de falhas (o que mais
+ * dói primeiro); empate desempata pela taxa (o que falha SEMPRE é mais grave que
+ * o que falha às vezes) e, por fim, pelo termo, para a lista ser estável.
+ *
+ * Puro de propósito: a precedência é a parte que erra sozinha, e é o que o teste
+ * prende. Não é a tela nem o aviso (caminho 3, fora do recorte) — é o dado.
+ */
+export function termosSemResultado(
+  linhas: ReadonlyArray<LinhaDeTermo>,
+): TermoSemResultado[] {
+  return linhas
+    .filter((l) => l.falhas > 0)
+    .map((l) => ({
+      tool_name: l.tool_name,
+      termo: l.termo,
+      total: l.total,
+      falhas: l.falhas,
+      taxa_de_falha: l.total > 0 ? l.falhas / l.total : 0,
+      ultima_vez: l.ultima_vez,
+    }))
+    .sort(
+      (a, b) =>
+        b.falhas - a.falhas ||
+        b.taxa_de_falha - a.taxa_de_falha ||
+        a.termo.localeCompare(b.termo, "pt-BR"),
+    );
 }
 
 /** O resumo de uma linha só, para o topo do painel. */

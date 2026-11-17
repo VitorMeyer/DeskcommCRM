@@ -3,7 +3,7 @@
  *
  * ## Por que isto é um módulo puro e não um punhado de `if` no componente
  *
- * São onze estados, e o modo de falha deles é MUDO: uma tela que não diz "seu
+ * São doze estados, e o modo de falha deles é MUDO: uma tela que não diz "seu
  * número só manda mensagem aprovada" aceita a configuração, fica verde, e o
  * aviso simplesmente nunca chega. O invariante 6 do Sistema Vivo — *"a
  * configuração mostra o estado efetivo, não só o que foi digitado"* — só é
@@ -48,6 +48,7 @@ function fatos(patch: Partial<FatosDaTelaDeAviso> = {}): FatosDaTelaDeAviso {
       telefone: "+5531998966398",
       rotulo: "Plantão da Ana",
       ligado: true,
+      respostaWhatsappHabilitada: false,
     },
     urlPublicaOk: true,
     agentesPublicados: { total: 1, comCasos: 1, assistidos: 0 },
@@ -157,6 +158,59 @@ describe("os estados que bloqueiam", () => {
     expect(lista.map((a) => a.codigo)).not.toContain("sem_conexao");
   });
 
+  describe("o número oficial com modelo aprovado (migration 9094)", () => {
+    const MODELO = { id: "33333333-3333-4333-8333-333333333333", nome: "aviso_da_equipe", idioma: "pt_BR", corpo: "Aviso: {{1}}" };
+    const oficial = (modelos: (typeof MODELO)[]) => ({
+      id: CANAL_OFICIAL,
+      nome: "Oficial",
+      status: "WORKING",
+      aceitaMensagemLivre: false,
+      atendeClientes: false,
+      modelos,
+    });
+    const configOficial = (modeloId: string | null) => ({
+      channelSessionId: CANAL_OFICIAL,
+      telefone: "+5531900000001",
+      rotulo: null,
+      ligado: false,
+      modeloId,
+    });
+
+    it("com um modelo que serve, o oficial já não é 'seus números não servem'", () => {
+      const lista = avisosDaTela(fatos({ conexoes: [oficial([MODELO])], config: null }));
+      expect(lista.map((a) => a.codigo)).not.toContain("so_canal_oficial");
+    });
+
+    it("escolhido COM o modelo que serve: liga, e nada bloqueia", () => {
+      const f = fatos({ conexoes: [oficial([MODELO])], config: configOficial(MODELO.id) });
+      expect(podeLigarOAviso(f)).toBe(true);
+      expect(avisosDaTela(f).filter((a) => a.bloqueia)).toEqual([]);
+    });
+
+    it("escolhido SEM modelo, ou com um que não serve mais: trava, e diz por quê", () => {
+      for (const modeloId of [null, "44444444-4444-4444-8444-444444444444"]) {
+        const f = fatos({ conexoes: [oficial([MODELO])], config: configOficial(modeloId) });
+        expect(podeLigarOAviso(f), String(modeloId)).toBe(false);
+        const aviso = avisosDaTela(f).find((a) => a.codigo === "oficial_sem_modelo");
+        expect(aviso, String(modeloId)).toMatchObject({ bloqueia: true, dados: { conexao: "Oficial", modelos: 1 } });
+      }
+    });
+
+    it("o bloqueio do modelo vem ANTES dos alertas — quem trava lê primeiro", () => {
+      const f = fatos({
+        conexoes: [{ ...oficial([MODELO]), atendeClientes: true }],
+        config: configOficial(null),
+      });
+      const codigos = avisosDaTela(f).map((a) => a.codigo);
+      expect(codigos.indexOf("oficial_sem_modelo")).toBeLessThan(codigos.indexOf("conexao_atende_clientes"));
+    });
+
+    it("conexão de texto livre ignora o modelo: liga sem ele", () => {
+      expect(podeLigarOAviso(fatos())).toBe(true);
+      expect(avisosDaTela(fatos()).map((a) => a.codigo)).not.toContain("oficial_sem_modelo");
+    });
+  });
+
   it("sem endereço público — bloqueia, porque o link do aviso não abriria nada", () => {
     const lista = avisosDaTela(fatos({ urlPublicaOk: false }));
     expect(lista.find((a) => a.codigo === "sem_endereco_publico")?.bloqueia).toBe(true);
@@ -257,7 +311,17 @@ describe("os estados que só informam", () => {
     const ontem = new Date(AGORA.getTime() - 24 * 3600_000).toISOString();
     const lista = avisosDaTela(fatos({ descarte: { ignoradas: 3, ultimaEm: ontem } }));
     const aviso = lista.find((a) => a.codigo === "descarte_acontecendo");
-    expect(aviso?.dados).toMatchObject({ ignoradas: 3, ultimaEm: ontem });
+    expect(aviso?.dados).toMatchObject({ ignoradas: 3, ultimaEm: ontem, comandos: 0 });
+  });
+
+  it("com a resposta pelo WhatsApp ligada, o descarte avisa a tela para ensinar o comando", () => {
+    const ontem = new Date(AGORA.getTime() - 24 * 3600_000).toISOString();
+    const base = fatos();
+    const lista = avisosDaTela(fatos({
+      descarte: { ignoradas: 3, ultimaEm: ontem },
+      config: { ...base.config!, respostaWhatsappHabilitada: true },
+    }));
+    expect(lista.find((a) => a.codigo === "descarte_acontecendo")?.dados).toMatchObject({ comandos: 1 });
   });
 
   it("descarte VELHO não aparece — o contador é acumulado, e a janela é a recência", () => {

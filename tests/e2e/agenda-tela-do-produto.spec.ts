@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "./helpers/test";
+import { esperarARevelacaoNasCargas, expect, test, type Page } from "./helpers/test";
 
 import { lerCreds, loginComoAdmin } from "./helpers/login-admin";
 import { partesNoFuso } from "../../lib/agenda/fuso";
@@ -32,6 +32,7 @@ test.describe("a Agenda como o dono do produto a usa", () => {
   test.beforeAll(async ({ browser }) => {
     test.setTimeout(240_000);
     page = await browser.newPage();
+    esperarARevelacaoNasCargas(page);
     await loginComoAdmin(page, lerCreds());
   });
 
@@ -55,7 +56,7 @@ test.describe("a Agenda como o dono do produto a usa", () => {
     // vermelho. E o estado vazio é justamente o da INSTALAÇÃO FRESCA: esta spec
     // passava só porque outra spec deixava agendamentos no banco antes dela.
     // Medido nas duas direções: com 3 linhas passa, com 0 linhas falha.
-    await expect(page.getByRole("heading", { name: "Agenda", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Agendamentos", exact: true })).toBeVisible();
   });
 
   test("as pessoas da equipe são REAIS — o filtro deixou de ser invisível", async () => {

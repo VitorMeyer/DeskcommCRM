@@ -60,7 +60,13 @@ function purposesDoTexto(texto: string, arquivo = "source.ts"): string[] {
       const enqueueResult = ts.isObjectLiteralExpression(object) && ts.isReturnStatement(object.parent) &&
         object.properties.some(p => ts.isPropertyAssignment(p) && p.name.getText(ast) === "kind" &&
           ts.isStringLiteralLike(p.initializer) && p.initializer.text === "enqueue_turn");
-      if (!enqueueResult) result.push(...literals(node.initializer));
+      // Ícone do manifest (`{ src, sizes, purpose: "maskable" }`, ImageResource
+      // da especificação do Web App Manifest) também não é chamada: mesma régua
+      // de forma, pelas propriedades irmãs.
+      const temIrma = (nome: string) => ts.isObjectLiteralExpression(object) &&
+        object.properties.some(p => ts.isPropertyAssignment(p) && p.name.getText(ast).replace(/["']/g, "") === nome);
+      const iconeDoManifest = temIrma("src") && temIrma("sizes");
+      if (!enqueueResult && !iconeDoManifest) result.push(...literals(node.initializer));
     }
     ts.forEachChild(node, visit);
   };
@@ -152,6 +158,8 @@ describe("registro de pontos de IA × código", () => {
     expect(purposesDoTexto(`const a = { purpose: payload.purpose };`)).toEqual([]);
     expect(purposesDoTexto(`function queue() { return { kind: "enqueue_turn", purpose: "send_message" }; }`)).toEqual([]);
     expect(purposesDoTexto(`runModelCall(db, cfg, { purpose: "send_message" });`)).toEqual(["send_message"]);
+    expect(purposesDoTexto(`const icons = [{ src: "/i", sizes: "512x512", purpose: "maskable" }];`)).toEqual([]);
+    expect(purposesDoTexto(`runModelCall(db, cfg, { src: "x", purpose: "agent_turn" });`)).toEqual(["agent_turn"]);
   });
 
   it("a varredura enxerga o código (controle positivo)", () => {
@@ -264,6 +272,10 @@ describe("capacidade exigida", () => {
     // tela. É o defeito que o painel precisa tornar impossível de configurar.
     expect(porId("agent_turn").exige.tools).toBe(true);
     expect(porId("operator_turn").exige.tools).toBe(true);
+    // O follow-up é o MESMO turno do agente, com as mesmas ferramentas na mão
+    // do modelo: se o ponto não exigisse, o painel deixaria escolher para ele o
+    // modelo que escreve bem e não opera o CRM.
+    expect(porId("followup_turn").exige.tools).toBe(true);
   });
 
   it("os pontos de embedding declaram a dimensão do contrato", () => {

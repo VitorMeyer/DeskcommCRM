@@ -38,16 +38,36 @@ São conclusões de leitura de código.
 | `/api/v1/webhooks/waha` (global, sem token) | só rede interna: requisição com marca de proxy de borda recebe 404 (`chegouPelaBorda`, `lib/http/ip-do-cliente.ts` — régua de cabeçalho, válida nos proxies do kit: Caddy, Traefik, Nginx Proxy Manager, túnel da Cloudflare); depois, o mesmo HMAC. Com a porta do app publicada direto, a camada que vale é a assinatura do remetente (`/admin/sistema`) | ❌ |
 | `/api/v1/webhooks/in/:token` | path token + assinatura opcional | ✅ 60/min por token |
 | `/api/v1/webhooks/nuvemshop/*` | HMAC | ❌ |
-| `/api/v1/webhooks/cobranca/:provedor` | Stripe: `Stripe-Signature` (HMAC com horário). Asaas: token estático em `asaas-access-token` (sha256 + `timingSafeEqual`); o corpo é só ponteiro e a decisão vem da releitura. Token vazado: o dono gera outro em Admin › Cobrança › Conexão, "Testar e conectar" de novo | ✅ recusas 120/min por IP; Asaas, avisos válidos de cliente desconhecido 120/min por provedor, chave global (acima, 200 sem gravar) |
+| `/api/v1/webhooks/cobranca/:provedor` | Stripe: `Stripe-Signature` (HMAC com horário). Asaas: token estático em `asaas-access-token` (sha256 + `timingSafeEqual`); o corpo é só ponteiro e a decisão vem da releitura. Token vazado: o dono gera outro em Admin › Cobrança › Conexão, "Testar e conectar" de novo | ✅ recusas 120/min por IP; Asaas, avisos válidos sem empresa identificada (cliente desconhecido ou leitura que falhou) 120/min por provedor, chave global (acima, 200 sem gravar) |
 | `/api/v1/cron/*` (9 rotas) | `Bearer INTERNAL_CRON_SECRET\|INTERNAL_SECRET`, **fail-closed** | ❌ |
-| `/api/internal/*` | `x-internal-secret` ou `Bearer INTERNAL_SECRET`, comparação em tempo constante | ❌ |
 | `/api/mcp` | `Bearer tok_...` validado contra `api_tokens` (hash SHA256) | ❌ |
+| `/api/v1/mcp-oauth/iniciar/:state` e `/api/v1/mcp-oauth/callback/:servidor` (OAuth por contato, 9095) | o `state` de `mcp_oauth_pedidos`: 256 bits, uso único (consumido por UPDATE condicional ANTES da troca do `code`), 10 min, amarrado a organização, servidor, contato e conversa; o `code` só vira token com o `code_verifier` cifrado daquela linha (PKCE S256). O endereço de retorno é um por servidor e tem de ser o do pedido; o `iss` (RFC 9207), quando vem, tem de ser o emissor dele. Nada da URL escolhe tenant | ✅ 30/min por IP |
 | `/403`, `/404`, `/500`, `/503`, `/admin/forbidden` | — | ❌ |
 
 **Leitura:** a autenticação de cada superfície está bem construída — HMAC com
 `timingSafeEqual` em 6 módulos distintos, crons fail-closed, bearer só via header
 (nunca query string), plaintext do token nunca persistido. O problema **não é o guard;
 é a ausência de limite de tentativas na frente dele.**
+
+### 1.1 O proxy da borda também é superfície (e o túnel, uma borda terceirizada)
+
+No stack padrão, o `Caddyfile` responde **403** a `/api/v1/webhooks/waha` — o webhook
+global, sem token na URL — antes de chegar ao app. O `docker-compose.traefik.yml`
+reproduz esse bloqueio; o `docker-compose.npm.yml` deixa o roteamento para o painel do
+NPM, e ali o bloqueio é responsabilidade do operador.
+
+O `docker-compose.cloudflared.yml` (instalação atrás de NAT, `REVERSE_PROXY=cloudflared`)
+**não tem como impor o 403 pelo compose**: o roteamento é administrado à distância, no
+painel da Cloudflare. Quem recusa é o próprio app: a rota global responde 404 ao que
+chega com marca de proxy de borda, e o túnel marca com `cf-connecting-ip` (ver a linha da
+rota na tabela acima). A assinatura do remetente é opcional e desligada de fábrica
+(`/admin/sistema`); uma regra de WAF no painel é camada extra, opcional.
+
+Fora isso, o túnel **reduz** a superfície clássica: não publica porta de entrada nenhuma
+(nada de 80/443 escutando), então a varredura de porta e o `network_mode: host` que este
+documento assume como premissa não existem nesse modo. O token do túnel é credencial de
+saída; vazá-lo permite publicar rotas no túnel da conta, e por isso ele nunca aparece em
+log nem em query string.
 
 ---
 
@@ -79,8 +99,8 @@ São conclusões de leitura de código.
 > front-matter diz nunca ter havido. O que esta nota faz é corrigir os **fatos** e marcar o T1
 > como devendo reauditoria — não decidir por ela.
 
-`checkRateLimit` existe (`lib/ai/dispatcher/rate-limit.ts`) e é chamado em **2** pontos
-do código: `/api/v1/webhooks/in/:token` e o dispatcher de IA. Nada mais.
+`checkRateLimit` existe (`lib/ai/dispatcher/rate-limit.ts`) e é chamado em vários pontos de
+`app/` e `lib/`, o webhook `/api/v1/webhooks/in/:token` entre eles. Reconte, não cite: `grep -rln 'checkRateLimit(' app lib --include='*.ts' | grep -v '\.test\.'`.
 
 Não há **nenhum** limite de tentativa em:
 
@@ -90,7 +110,7 @@ Não há **nenhum** limite de tentativa em:
   exaustão de recurso (e de cota de IA, se as chaves forem da instância).
 - **`/team/accept-invite/:token`** — o HMAC é forte, mas sem limite o atacante pode
   sondar indefinidamente e sem custo, e sem gerar sinal de alerta.
-- **Os 9 crons e `/api/internal/*`** — o secret é forte e a comparação é em tempo
+- **Os 9 crons** — o secret é forte e a comparação é em tempo
   constante, mas nada limita o volume de tentativas.
 - **`/api/mcp`** — enumeração de bearer token.
 
@@ -225,8 +245,14 @@ Não avaliado por falta de execução/instância:
 - Se as políticas RLS **realmente** isolam (os invariantes existem para provar; não foram rodados).
 - Postura do container WAHA — `docker-compose.prod.yml` comenta "Core por default, dashboard
   off", mas exposição de porta e rede não foram verificadas contra instância viva.
-- Config do Caddy (`Caddyfile`) — TLS, headers de segurança, HSTS.
-- Se `next.config.ts` define CSP / security headers.
+- Config do Caddy (`Caddyfile`) — TLS. Cabeçalho ele não define nenhum (`grep -i header Caddyfile*`
+  não acha nada); os de segurança vêm da origem, no item abaixo.
+- Cabeçalhos de segurança, e este é MEDIDO em vez de "não avaliado": `next.config.ts` manda,
+  em toda resposta, `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`,
+  HSTS de um ano **sem** `includeSubDomains` (o domínio é do cliente e pode ser o apex) e uma
+  CSP curta — `frame-ancestors 'none'; base-uri 'self'; form-action 'self'`, **sem**
+  `script-src`, porque o Next injeta bootstrap inline. Quem reprova a regressão é
+  `tests/unit/cabecalhos-de-seguranca-do-painel.test.ts`.
 - Storage: se o bucket `whatsapp-media` está privado de fato e se a expiração das signed
   URLs é adequada.
 - Storage, e este é MEDIDO e DECLARADO em vez de "não avaliado": `brand-logos` (migration
@@ -242,8 +268,8 @@ Não avaliado por falta de execução/instância:
   continuam só no `service_role`), caminho **não-enumerável** (`<prefixo>/<uuid v4>.<ext>`)
   e teto de 512 KB. O que entra é decidido pelos **bytes** (`lib/branding/logo-arquivo.ts`),
   nunca pelo `Content-Type` — `allowed_mime_types` do bucket e `file.type` na rota leem a
-  mesma string que quem sobe escolhe. **SVG é banido**: este repo não define CSP (ver o item
-  acima sobre `next.config.ts`), e SVG navegado direto do endereço da imagem executa script.
+  mesma string que quem sobe escolhe. **SVG é banido**: a CSP do painel não tem `script-src` e
+  não vale no origin do Storage (ver o item acima sobre `next.config.ts`), e SVG navegado direto do endereço da imagem executa script.
   O que NÃO está coberto: um logo subido é **público para sempre até ser trocado** — quem
   subir por engano uma arte confidencial precisa removê-la pela tela, e a URL antiga deixa
   de existir junto com o arquivo (a rota apaga o anterior na troca).
@@ -264,6 +290,20 @@ Não avaliado por falta de execução/instância:
 | T7 | Sem scan de secret no CI + 116 PNGs de evidência sem revisão de PII | 🟡 | baixo |
 | T6 | Guard de SSRF existe; o E2E que o prova não roda no CI | 🟢 | baixo |
 
+## 4.5 Banco externo — receitas prontas (Spec 25, R1)
+
+Superfície nova, toda atrás de sessão + `requireRole("admin")` + `requireSupportWrite()`:
+
+| Path | Guard | Rate limit | O que expõe |
+|------|-------|------------|-------------|
+| `PUT /api/v1/external-db/connections/:id/recipes` | admin + requireSupportWrite | `external-db:write` (30/60s) | gravar instâncias de receita (audit: só contagens) |
+| `POST /api/v1/external-db/connections/:id/recipes/preview` | admin + requireSupportWrite | `external-db:write` (30/60s) | executar uma instância, devolve linhas (audit: só contagens) |
+| `crm_consultar_receita` (tool MCP) | agente, `modulo: "banco_externo"` | teto de token do turno | listar/executar instâncias; organização **sempre do `ctx`** |
+
+Controles: a coluna `receitas` fica FORA da view `external_db_connections_safe` (só `receitas_count` exposta); o prefixo das tabelas entra no SQL quotado com crase (nunca cru); todo valor vai por placeholder `?`; o validador `validarConsultaDeReceita` é a segunda trava (SELECT-only, sem `;`/`--`/`INTO`/`SLEEP(`/etc.); o rastro da execução resume `linhas` (nunca o conteúdo — regra de escopo da D8).
+
+A receita `wordpress-conteudo` (R2) pode ler, além de `posts`/`postmeta`, as **tabelas de categoria** do WordPress (`terms`, `term_taxonomy`, `term_relationships`) — e só quando o administrador mapeou alguma categoria. Elas passam pela MESMA lista de fontes liberadas (`tabelaLiberada`/`colunasLiberadas`, em `lib/external-db/fontes.ts`), então o administrador precisa liberá-las como qualquer outra tabela: quem não libera, recebe `fonte_nao_liberada` e a consulta não roda. O conteúdo dos termos é dado de terceiro (o autor do site), e ele chega ao agente como NOME de categoria — o mesmo regime do resto da receita: o rastro guarda contagens, nunca o conteúdo.
+
 **Conclusão honesta:** os *mecanismos* de segurança deste projeto são acima da média para
 um CRM open-source — HMAC em tempo constante em toda borda, fail-closed nos crons, hash de
 bearer, RLS com helper central, guard de SSRF testado, LGPD implementada de verdade,
@@ -274,6 +314,21 @@ falha de desenho aqui; há uma camada ausente, e ela é a mais barata de todas a
 construídas.
 
 ---
+
+## 4.6 Servidores MCP por agente e OAuth por contato (migration 9095)
+
+Superfície nova. Guia: [`integracao/mcp-oauth-por-contato.md`](integracao/mcp-oauth-por-contato.md).
+
+| Superfície | Controle | Teste |
+|---|---|---|
+| Rotas públicas `iniciar/:state` e `callback` | `state` de uso único, expira em 10 min, amarrado ao contato e à conversa; consumo antes da troca; `error=` do AS só depois de consumir; página de desfecho sem dado sensível, sem script, `no-store` e `no-referrer`; rate limit por IP | `lib/mcp/servidor-externo/do-agente/oauth-por-contato.test.ts` |
+| Tokens de terceiro (`contato_mcp_credenciais`), chave e `client_secret` (`ai_agent_mcp_servers`), `code_verifier` (`mcp_oauth_pedidos`) | AES-256-GCM com `AI_CRED_AES_KEY`; tabelas server-side only (RLS sem policy, nenhum GRANT para `anon`/`authenticated`); filtro manual por `organization_id` + `servidor_id` + `contact_id` do turno; token nunca em log, auditoria, `event_log` ou resposta de ferramenta | `tests/invariants/servidores-mcp-por-agente-server-side.test.ts` + marcador de token no teste unitário |
+| Saída para o terceiro (MCP, descoberta, DCR, token, revogação) | o mesmo `fetchDeSaida`: prova textual, DNS sem faixa privada, `redirect: "manual"` dentro da allowlist dos hosts descobertos; S256 obrigatório no cadastro | idem |
+| Link enviado pelo canal | é o link curto da instalação (não expõe parâmetro do OAuth). **Risco residual aceito:** quem tiver o link nos 10 minutos e o login do terceiro vincula a PRÓPRIA conta àquele contato — o mesmo modelo de qualquer "entrar com" enviado por mensagem. O link é de uso único e só serve ao contato e à conversa que o gerou | — |
+| Escrita delegada | desligada por padrão; só `oauth_por_contato`, só ferramenta marcada Escrita pelo admin, só com o token do contato do turno; passa por `wrapMcpTool` (auditoria, papel, escopo) | idem |
+
+**Não feito nesta fatia (declarado):** o callback não reabre o turno; o `state` é guardado em
+claro como chave primária (o `code_verifier` é que prova a posse, e está cifrado).
 
 ## 4. Perguntas para o responsável
 

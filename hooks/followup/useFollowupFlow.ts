@@ -16,6 +16,12 @@ export interface FollowupFlowDetailRow {
   active_version_id: string | null;
   draft_graph: FlowGraph | null;
   handoff_policy: "pause" | "cancel" | "allow";
+  /**
+   * #3974 — "enviar mesmo com a conversa atribuída a uma pessoa". Opção do
+   * FLUXO, independente da política de handoff (que continua valendo para a IA
+   * responder). Ausente em fluxo antigo = `false`, o comportamento de sempre.
+   */
+  send_when_assigned: boolean;
   trigger_config: Record<string, unknown>;
   /** Superfície do fluxo: decide a paleta, os controles da barra e o Fim. */
   surface: FollowupFlowSurface;
@@ -83,10 +89,18 @@ export function usePublishFollowupFlow(id: string) {
       const res = await apiClient.post<SingleResponse>(`/api/v1/ai/followup-flows/${id}/publish`, {});
       return res.data;
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: followupFlowQueryKey(id) });
       qc.invalidateQueries({ queryKey: ["followup", "flows", "list"] });
       toast.success(t("Fluxo publicado."));
+      // OS AVISOS DO GATILHO, um a um, no momento em que a pessoa está olhando.
+      // Eles não reprovam a publicação (ver `avisosDoGatilho`), e guardá-los
+      // para depois é guardá-los para nunca. `duration` longa de propósito: a
+      // frase é longa e diz o que fazer, não só que há algo errado.
+      const avisos = (data as { avisos?: Array<{ code: string; message: string }> } | undefined)?.avisos;
+      for (const aviso of avisos ?? []) {
+        toast.warning(t(aviso.message), { duration: 12_000 });
+      }
     },
   });
 }
@@ -199,6 +213,33 @@ export function useUpdateHandoffPolicy(id: string) {
         prev ? { ...prev, ...updated } : prev,
       );
       toast.success(t("Política de handoff atualizada."));
+    },
+    onError: (err) => showApiError(err),
+  });
+}
+
+/**
+ * #3974 — a opção "enviar mesmo com a conversa atribuída a uma pessoa".
+ *
+ * PATCH da coluna do pointer, como a política de handoff: é uma decisão do
+ * FLUXO (esta etapa manda mesmo com o vendedor dono da conversa?), não um ajuste
+ * de tela — por isso não passa por `draft_graph` e não exige salvar o grafo.
+ */
+export function useUpdateSendWhenAssigned(id: string) {
+  const t = useT();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (send_when_assigned: boolean) => {
+      const res = await apiClient.patch<SingleResponse>(`/api/v1/ai/followup-flows/${id}`, {
+        send_when_assigned,
+      });
+      return res.data;
+    },
+    onSuccess: (updated) => {
+      qc.setQueryData<FollowupFlowDetailRow>(followupFlowQueryKey(id), (prev) =>
+        prev ? { ...prev, ...updated } : prev,
+      );
+      toast.success(t("Opção de envio com a conversa atribuída atualizada."));
     },
     onError: (err) => showApiError(err),
   });

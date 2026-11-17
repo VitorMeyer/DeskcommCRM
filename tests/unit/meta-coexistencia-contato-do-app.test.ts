@@ -12,10 +12,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * As quatro coisas que este arquivo prova:
  *
  *   1. o payload vira evento (`smb_app_state_sync` → `app_contact_sync`);
- *   2. o evento vira CONTATO com o nome do app — e nada mais: nenhuma escrita em
- *      `messages`/`conversations`, nenhuma pausa de IA, nenhuma marcação de
- *      conversa (o `admin.from` de mentira em explodir em qualquer tabela que
- *      não seja `channel_sessions` é justamente essa prova);
+ *   2. o evento vira CONTATO com o nome do app no campo que SÓ A EQUIPE vê
+ *      (`address_book_name`), nunca em `display_name` (que o `{{nome}}` das
+ *      campanhas lê) — e nada mais: nenhuma escrita em `messages`/`conversations`,
+ *      nenhuma pausa de IA, nenhuma marcação de conversa (o `admin.from` de
+ *      mentira explode em qualquer tabela que não seja `channel_sessions` ou um
+ *      UPDATE de `contacts`, e é justamente essa a prova);
  *   3. `remove`/payload sem nome não escreve nada (`ignored: sem_nome`);
  *   4. sync de OUTRO número não vaza: sessão que não é dona do `phone_number_id`
  *      devolve `no_session` sem uma única escrita.
@@ -28,16 +30,18 @@ const estado = vi.hoisted(() => ({
     id: string;
     organization_id: string;
   } | null,
-  contatoExistente: null as { id: string; phone_number: string } | null,
+  contatoExistente: null as { id: string; phone_number: string; is_anonymized?: boolean } | null,
   numeroInterno: false,
   erroContato: null as { code: string; message: string } | null,
   marcacoes: [] as Array<Record<string, unknown>>,
   pausas: [] as Array<Record<string, unknown>>,
   auditorias: [] as Array<Record<string, unknown>>,
+  gravacoesDeContato: [] as Array<{ payload: Record<string, unknown>; filtros: Array<[string, unknown]> }>,
 }));
 
 vi.mock("@/lib/channels/contato-por-telefone", () => ({
   encontrarContatoPorTelefone: async () => estado.contatoExistente,
+  encontrarContatoPorTelefoneComAnonimizacao: async () => estado.contatoExistente,
 }));
 vi.mock("@/lib/escalacao/numero-interno-de-aviso", () => ({
   ehNumeroInternoDeAviso: async () => estado.numeroInterno,
@@ -100,9 +104,29 @@ function adminFalso(): SupabaseClient {
       };
       return chain;
     }
+    if (table === "contacts") {
+      return {
+        update: (payload: Record<string, unknown>) => {
+          const registro = { payload, filtros: [] as Array<[string, unknown]> };
+          estado.gravacoesDeContato.push(registro);
+          const chain: Record<string, unknown> = {
+            eq: (coluna: string, valor: unknown) => {
+              registro.filtros.push([coluna, valor]);
+              return chain;
+            },
+            then: (ok: (v: unknown) => unknown) => ok({ data: null, error: null }),
+          };
+          return chain;
+        },
+      };
+    }
     throw new Error(`tabela inesperada: ${table}`);
   };
   const rpc = async (name: string, args: Record<string, unknown>) => {
+    // A pergunta do titular apagado tem teste próprio
+    // (`meta-coexistencia-titular-apagado`) e fica FORA de `estado.rpcs`: os
+    // casos abaixo contam as RPCs do caminho do contato.
+    if (name === "fn_titular_apagado_a_pedido") return { data: false, error: null };
     estado.rpcs.push({ name, args });
     if (name === "fn_upsert_wa_contact") {
       return estado.erroContato
@@ -132,6 +156,7 @@ beforeEach(() => {
   estado.marcacoes = [];
   estado.pausas = [];
   estado.auditorias = [];
+  estado.gravacoesDeContato = [];
 });
 
 describe("parser: smb_app_state_sync vira evento de contato", () => {
@@ -199,7 +224,7 @@ describe("parser: smb_app_state_sync vira evento de contato", () => {
 });
 
 describe("ingestão do contato do app", () => {
-  it("grava o contato com o nome do celular e NÃO toca em mensagem, conversa ou IA", async () => {
+  it("grava o contato com o nome do celular no campo da equipe e NÃO toca em mensagem, conversa ou IA", async () => {
     const r = await ingestMetaAppContactSync(adminFalso(), CONTATO_DO_APP, { organizationId: "org-1" });
 
     expect(r).toEqual({ status: "synced", contactId: "contact-1" });
@@ -209,8 +234,20 @@ describe("ingestão do contato do app", () => {
       p_org: "org-1",
       p_kind: "phone",
       p_chat_id: "5519999999999",
-      p_notify: "Ana Souza",
     });
+    // `p_notify` vira `display_name`, que o `{{nome}}` das campanhas lê: o nome
+    // da agenda não pode passar por ele.
+    expect(estado.rpcs[0]?.args.p_notify).toBeNull();
+    expect(estado.gravacoesDeContato).toEqual([
+      {
+        payload: { address_book_name: "Ana Souza" },
+        filtros: [
+          ["id", "contact-1"],
+          ["organization_id", "org-1"],
+          ["is_anonymized", false],
+        ],
+      },
+    ]);
     expect(estado.rpcs[0]?.args.p_phone).toContain("5519999999999");
     // Nada de caixa de entrada nem de agente: ninguém trocou mensagem.
     expect(estado.marcacoes).toEqual([]);
@@ -281,6 +318,11 @@ describe("a rota do webhook oficial entrega o contato do app à ingestão", () =
       appDaMeta: async () => ({ appSecret: segredo, verifyToken: null }),
     }));
     vi.doMock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({}) }));
+    vi.doMock("@/lib/channels/meta/titular-apagado", () => ({
+      perguntarTitularesApagadosNoLote: async () => ({ apagados: new Set<string>() }),
+      MOTIVO_TITULAR_APAGADO: "titular_apagado_a_pedido",
+      MOTIVO_CONTATO_ANONIMIZADO: "contato_anonimizado",
+    }));
     vi.doMock("@/lib/channels/meta/ingest", () => ({
       ingestMetaInbound: async () => ({ status: "ingested" }),
       ingestMetaEcho: async () => ({ status: "ingested" }),
@@ -346,6 +388,11 @@ describe("contato do app sem assinatura válida não chega à ingestão", () => 
         appDaMeta: async () => ({ appSecret: segredo, verifyToken: null }),
       }));
       vi.doMock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({}) }));
+      vi.doMock("@/lib/channels/meta/titular-apagado", () => ({
+        perguntarTitularesApagadosNoLote: async () => ({ apagados: new Set<string>() }),
+        MOTIVO_TITULAR_APAGADO: "titular_apagado_a_pedido",
+        MOTIVO_CONTATO_ANONIMIZADO: "contato_anonimizado",
+      }));
       vi.doMock("@/lib/channels/meta/ingest", () => ({
         ingestMetaInbound: async () => ({ status: "ingested" }),
         ingestMetaEcho: async () => ({ status: "ingested" }),
@@ -383,6 +430,11 @@ describe("canal parceiro: contato do app de OUTRO número não vaza", () => {
     const sincronizados: unknown[] = [];
     vi.doMock("@/lib/channels/graph-parceiro/session", () => ({
       graphPartnerRefsDaSessao: async () => ({ phoneNumberId: "phone-1", wabaId: "waba-1" }),
+    }));
+    vi.doMock("@/lib/channels/meta/titular-apagado", () => ({
+      perguntarTitularesApagadosNoLote: async () => ({ apagados: new Set<string>() }),
+      MOTIVO_TITULAR_APAGADO: "titular_apagado_a_pedido",
+      MOTIVO_CONTATO_ANONIMIZADO: "contato_anonimizado",
     }));
     vi.doMock("@/lib/channels/meta/ingest", () => ({
       ingestMetaInbound: async () => ({ status: "ingested" }),

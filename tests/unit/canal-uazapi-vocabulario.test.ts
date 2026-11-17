@@ -13,7 +13,7 @@ import { CHANNEL_SESSION_REF_COLUMNS, resolveSessionRef } from "@/lib/channels/s
 import { fonteDeTemplates } from "@/lib/channels/templates-fonte";
 
 const UAZAPI = "uazapi" as const;
-const MIGRATION = "supabase/migrations/20261014100000_0659_canal_uazapi.sql";
+const MIGRATION = "supabase/migrations/20261117180233_9412_canal_uazapi.sql";
 
 describe("canal uazapi — vocabulário e seam", () => {
   it("declara perfil de canal livre, com risco de banimento e grupos", () => {
@@ -64,7 +64,7 @@ describe("canal uazapi — vocabulário e seam", () => {
     expect(migration).toContain("'uazapi'");
 
     expect(readFileSync("supabase/migrations/MANIFEST.md", "utf8")).toContain(
-      "`0659_canal_uazapi`",
+      "`9412_canal_uazapi`",
     );
   });
 });

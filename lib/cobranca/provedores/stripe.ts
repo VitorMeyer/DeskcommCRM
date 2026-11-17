@@ -23,6 +23,7 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto
 
 import { z } from "zod";
 
+import type { Moeda } from "@/lib/cobranca/vocabulario";
 import { logger } from "@/lib/logger";
 
 import {
@@ -190,7 +191,7 @@ const assinaturaDaStripe = z.object({
   trial_end: z.number().nullish(),
   items: z.object({
     data: z.array(
-      z.object({ id: z.string(), current_period_end: z.number(), price: z.object({ unit_amount: z.number().nullish() }).nullish() }),
+      z.object({ id: z.string(), current_period_start: z.number().nullish(), current_period_end: z.number(), price: z.object({ unit_amount: z.number().nullish() }).nullish() }),
     ),
   }),
 });
@@ -230,9 +231,19 @@ function pagouAssinaturaEncerrada(pagas: FaturaDaStripe[], assinaturas: Assinatu
   return dona !== undefined && TERMINAIS.has(dona.status) && pagaEm !== null && fim !== null && pagaEm > fim;
 }
 
+/**
+ * O idioma da página de pagamento: real fica em português, como sempre; dólar e
+ * euro deixam a Stripe escolher pelo navegador de quem paga, que é quem a moeda
+ * diz estar fora do Brasil.
+ */
+function idiomaDoCheckout(moeda: Moeda): "pt-BR" | "auto" {
+  return moeda === "BRL" ? "pt-BR" : "auto";
+}
+
 function precoRecorrente(plano: PlanoParaProvedor, produto: string) {
   return {
-    currency: "brl",
+    // A moeda é a do plano (migration 9332): a Stripe recebe o código ISO em minúsculas.
+    currency: plano.moeda.toLowerCase(),
     unit_amount: plano.precoCents,
     recurring: { interval: plano.intervalo === "ano" ? "year" : "month" },
     product: produto,
@@ -457,7 +468,7 @@ export function criarAdaptadorStripe(dep: DependenciasDaStripe): AdaptadorDeCobr
           metadata: metadados,
           success_url: sucesso.toString(),
           cancel_url: p.urlDeVolta,
-          locale: "pt-BR",
+          locale: idiomaDoCheckout(p.plano.moeda),
         },
         `${p.chaveIdempotencia}:checkout`,
       ),
@@ -467,6 +478,52 @@ export function criarAdaptadorStripe(dep: DependenciasDaStripe): AdaptadorDeCobr
     // A assinatura só nasce depois do pagamento (Checkout desde a basil): sem ref aqui.
     // A SESSÃO fica: é a id que a troca de plano expira no provedor (#2609).
     return { url, expiraEm: new Date(sessao.expires_at * 1000), assinaturaRef: null, sessaoId: sessao.id };
+  }
+
+  async function iniciarAjusteProporcional(p: Parameters<AdaptadorDeCobranca["iniciarAjusteProporcional"]>[0]) {
+    const orgId = UUID.parse(p.orgId);
+    const produto = await garantirProduto(p.plano);
+    const sucesso = new URL(p.urlDeVolta);
+    sucesso.searchParams.set("voltou", "1");
+    const sessao = ler(
+      sessaoDeCheckout,
+      await chamar("POST", "/checkout/sessions", {
+        mode: "payment",
+        customer: p.clienteRef,
+        client_reference_id: orgId,
+        line_items: [{ price_data: { currency: p.plano.moeda.toLowerCase(), unit_amount: p.valorCents, product: produto }, quantity: 1 }],
+        metadata: { organization_id: orgId, plano_id: p.plano.id, tipo: "ajuste_proporcional" },
+        success_url: sucesso.toString(),
+        cancel_url: p.urlDeVolta,
+        locale: idiomaDoCheckout(p.plano.moeda),
+      },
+      `ajuste:${orgId}:${p.chaveIdempotencia}`),
+    );
+    const url = linkSeguro(sessao.url);
+    if (url === null) throw new ErroDoProvedor(200, "resposta_invalida", false);
+    return { pagamentoRef: sessao.id, url };
+  }
+
+  /**
+   * Boleto (e todo método que confirma depois) deixa a sessão `complete` com
+   * `payment_status: unpaid` até compensar: isso é PENDENTE, não encerrado —
+   * lido como encerrado, a troca era esquecida e o boleto pago depois nunca
+   * virava plano. Quem diz se ainda vai pagar é o PaymentIntent: `processing` ou
+   * `requires_action` (boleto emitido, esperando) seguem vivos; o resto morreu.
+   */
+  async function lerPagamentoProporcional(pagamentoRef: string): Promise<"pendente" | "pago" | "encerrado"> {
+    const sessao = ler(
+      z.object({
+        status: z.string(),
+        payment_status: z.string(),
+        payment_intent: z.object({ status: z.string() }).nullish(),
+      }),
+      await chamar("GET", `/checkout/sessions/${encodeURIComponent(pagamentoRef)}?expand[]=payment_intent`),
+    );
+    if (sessao.payment_status === "paid") return "pago";
+    if (sessao.status === "open") return "pendente";
+    const intencao = sessao.payment_intent?.status;
+    return sessao.status === "complete" && (intencao === "processing" || intencao === "requires_action") ? "pendente" : "encerrado";
   }
 
   /**
@@ -529,6 +586,7 @@ export function criarAdaptadorStripe(dep: DependenciasDaStripe): AdaptadorDeCobr
       emAtraso,
       vencidaDesde: null,
       proximoVencimento: fimDoPeriodo === null ? null : emData(fimDoPeriodo),
+      periodoPagoDesde: existe && principal?.items.data[0]?.current_period_start ? emData(principal.items.data[0].current_period_start) : null,
       jaPagou: pagas.length > 0,
       emTesteNoProvedorAte: fimDoTeste === null ? null : emData(fimDoTeste),
       pagamentoSemAssinaturaViva: pagouAssinaturaEncerrada(pagas, recentes),
@@ -548,7 +606,7 @@ export function criarAdaptadorStripe(dep: DependenciasDaStripe): AdaptadorDeCobr
     const item = ler(assinaturaDaStripe, await chamar("GET", caminho)).items.data[0];
     if (!item) throw new ErroDoProvedor(null, "assinatura_sem_item", false);
     const produto = await garantirProduto(p.plano);
-    // Sem proração: o período em curso segue no preço pago; a próxima fatura sai com o novo (D-3).
+    // Sem proração automática: o período pago foi ajustado pela cobrança avulsa; a próxima fatura sai com o novo preço, sem mover a âncora.
     await chamar("POST", caminho, {
       items: [{ id: item.id, price_data: precoRecorrente(p.plano, produto) }],
       proration_behavior: "none",
@@ -652,6 +710,8 @@ export function criarAdaptadorStripe(dep: DependenciasDaStripe): AdaptadorDeCobr
     verificarWebhook: verificarWebhookStripe,
     garantirCliente,
     iniciarAssinatura,
+    iniciarAjusteProporcional,
+    lerPagamentoProporcional,
     expirarSessao,
     lerSituacao,
     trocarPlano,

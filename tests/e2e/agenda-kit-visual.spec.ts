@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "./helpers/test";
+import { esperarARevelacaoNasCargas, expect, test, type Page } from "./helpers/test";
 
 import { lerCreds, loginComoAdmin } from "./helpers/login-admin";
 
@@ -119,6 +119,11 @@ async function medirTrilhas(page: Page) {
   }>;
 }
 
+/** Impressão digital do estilo MEDIDO — o dado que a asserção usa. */
+function estiloMedido(m: Awaited<ReturnType<typeof medirTrilhas>>): string {
+  return `${m.cores.join("|")}//${m.fundo}`;
+}
+
 test.describe("kit visual da Agenda", () => {
   let page: Page;
 
@@ -131,6 +136,7 @@ test.describe("kit visual da Agenda", () => {
     // mensagem apontando para a linha do `waitForURL` — que estava certa.
     test.setTimeout(240_000);
     page = await browser.newPage();
+    esperarARevelacaoNasCargas(page);
     await loginComoAdmin(page, lerCreds());
   });
 
@@ -212,8 +218,10 @@ test.describe("kit visual da Agenda", () => {
     // duas vezes na página, e um localizador global resolve para 2 elementos —
     // o modo estrito do Playwright reprova. Custou um run inteiro descobrir.
     //
-    // Escolhe um dia que TEM horário (a fixture garante).
-    await painel.getByTestId("dia-2026-08-24").click();
+    // Escolhe um dia que TEM horário E que vem DEPOIS do agora da vitrine
+    // (quarta 26/08 14h37): horário anterior ao agora não é agendável (#3774),
+    // então 24 e 25/08, que a fixture ainda publica, aparecem desabilitados.
+    await painel.getByTestId("dia-2026-08-28").click();
 
     await expect(painel).toHaveAttribute("data-tempo", "escolhendo-horario", { timeout: ESPERA });
     await expect(coluna).toHaveAttribute("data-aberta", "true");
@@ -245,7 +253,7 @@ test.describe("kit visual da Agenda", () => {
     const painel = page.getByTestId("secao-sem-lembrete").getByTestId("painel-de-marcacao");
     await painel.scrollIntoViewIfNeeded();
 
-    await painel.getByTestId("dia-2026-08-24").click();
+    await painel.getByTestId("dia-2026-08-28").click();
     await painel.getByTestId("horario-10:00").click();
     await expect(painel).toHaveAttribute("data-tempo", "confirmando", { timeout: ESPERA });
 
@@ -274,7 +282,7 @@ test.describe("kit visual da Agenda", () => {
     // nos dois — e um aviso que aparece sempre não informa nada.
     const painel = page.getByTestId("secao-marcacao").getByTestId("painel-de-marcacao");
     await painel.scrollIntoViewIfNeeded();
-    await painel.getByTestId("dia-2026-08-24").click();
+    await painel.getByTestId("dia-2026-08-28").click();
     await painel.getByTestId("horario-10:00").click();
     await expect(painel).toHaveAttribute("data-tempo", "confirmando", { timeout: ESPERA });
     await expect(painel.getByTestId("aviso-sem-lembrete")).toHaveCount(0);
@@ -459,12 +467,17 @@ test.describe("kit visual da Agenda", () => {
     // Não fecha prosa em geral — fecha a prosa que se compromete com medida, que
     // é justamente a que envelhece com mais confiança.
     await page.goto(VITRINE);
+    // A prontidão ANTES da leitura — a mesma que o `beforeEach` espera. O goto
+    // extra deste caso pode ler a seção com a tela ainda montando, e aí a
+    // contagem de números afirmados sai vazia por um motivo que não é do texto.
+    await expect(page.getByTestId("grade-da-agenda")).toBeVisible({ timeout: ESPERA });
     const texto = await page.getByTestId("secao-paleta").innerText();
 
     const afirmados = [...texto.matchAll(/0,(\d{3})/g)].map((m) => Number(`0.${m[1]}`));
     expect(afirmados.length, `a seção deveria afirmar números; texto: ${texto}`).toBeGreaterThanOrEqual(2);
 
     const medido = { claro: 0, escuro: 0 };
+    let estiloDoClaro = "";
     for (const tema of ["claro", "escuro"] as const) {
       if (tema === "escuro") {
         await page.getByTestId("alternar-tema").click();
@@ -473,8 +486,19 @@ test.describe("kit visual da Agenda", () => {
             timeout: ESPERA,
           })
           .toBe("dark");
+        // ⚠️ O ATRIBUTO TROCA ANTES DO ESTILO. Medido no CI: numa rodada o
+        // `data-theme` já dizia `dark` e o swatch ainda computava a cor do tema
+        // claro — a medição saiu 0.0032 fora, contra a tolerância de 0.002
+        // (uma vez em 258). A espera abaixo observa o dado que a asserção usa
+        // (as cores medidas + o fundo), não o atributo: só mede quando o
+        // estilo chegou de verdade.
+        await expect
+          .poll(async () => estiloMedido(await medirTrilhas(page)), { timeout: ESPERA })
+          .not.toBe(estiloDoClaro);
       }
-      medido[tema] = (await medirTrilhas(page)).menorDistancia;
+      const medida = await medirTrilhas(page);
+      if (tema === "claro") estiloDoClaro = estiloMedido(medida);
+      medido[tema] = medida.menorDistancia;
     }
 
     // Os dois primeiros números do texto são o par mais próximo em cada tema.
@@ -666,7 +690,7 @@ test.describe("kit visual da Agenda", () => {
     // horários) ainda não existe. Sem esta foto, a evidência mostraria tudo
     // menos aquilo que se foi construir.
     const painelDaFoto = page.getByTestId("secao-marcacao").getByTestId("painel-de-marcacao");
-    await painelDaFoto.getByTestId("dia-2026-08-25").click();
+    await painelDaFoto.getByTestId("dia-2026-08-28").click();
     await expect(painelDaFoto.getByTestId("coluna-de-horarios")).toHaveAttribute(
       "data-aberta",
       "true",

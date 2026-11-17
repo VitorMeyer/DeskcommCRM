@@ -1,10 +1,14 @@
 import { toast } from "sonner";
 
+import { descricaoComCanal } from "@/lib/channels/marca-do-canal";
 import { traduzir } from "@/lib/i18n/dicionario";
 import { idiomaAtual } from "@/lib/i18n/IdiomaProvider";
+import { aderecosDoAviso } from "@/lib/notifications/marca-do-aviso";
+import { conteudoNaTelaBloqueadaWriteSchema, type ConteudoNaTelaBloqueada } from "@/lib/schemas/settings";
 import { emitNotification } from "./emit";
 import type { NotifyKind } from "./kinds";
 import { canalLigado, type NotifyCategory } from "./prefs";
+import { redigirParaATelaBloqueada } from "./tela-bloqueada";
 
 export interface EntregarAvisoInput {
   category: NotifyCategory;
@@ -14,6 +18,35 @@ export interface EntregarAvisoInput {
   tag?: string;
   href?: string;
   icon?: string;
+  /** O que a bandeja mostra no modo `nome` no lugar de `body`; ausente = corpo vazio. */
+  corpoSemPrevia?: string;
+  /**
+   * A REDE de onde o aviso veio (`whatsapp`, `telegram`, …, ou `unknown`).
+   * Ausente = aviso que não vem de conversa (lead, menção, exportação) e que
+   * portanto não ganha marca — os toasts existentes seguem idênticos (#4094).
+   */
+  canal?: string;
+  /**
+   * A empresa quer o aviso na cor do canal? Ausente = sim (o padrão desde a
+   * #4094). Quem sabe a resposta é a rota `aviso-de-mensagem`, que a devolve
+   * junto com `canal`; um produtor que não a tem não muda o que já existia.
+   */
+  corPorCanal?: boolean;
+  /** A opção da empresa, quando o produtor já a tem; senão é lida do servidor. */
+  conteudo?: ConteudoNaTelaBloqueada;
+}
+
+/** A opção da empresa para a bandeja. Sem resposta válida, `oculto`. */
+async function conteudoDaBandeja(): Promise<ConteudoNaTelaBloqueada> {
+  try {
+    const r = await fetch("/api/v1/notifications/push", { credentials: "include" });
+    if (!r.ok) return "oculto";
+    const json = (await r.json()) as { data?: { conteudo?: unknown } | null };
+    const conteudo = conteudoNaTelaBloqueadaWriteSchema.safeParse(json.data?.conteudo);
+    return conteudo.success ? conteudo.data : "oculto";
+  } catch {
+    return "oculto";
+  }
 }
 
 export function entregarAviso(input: EntregarAvisoInput): void {
@@ -30,8 +63,17 @@ export function entregarAviso(input: EntregarAvisoInput): void {
     // mensagem" e deixava a pessoa procurando a conversa na mão. Com ação, ele
     // leva direto para lá. Sem destino, não inventa botão: um botão morto é
     // pior que nenhum.
+    //
+    // A marca do canal (ícone + faixa na cor da rede) entra só quando o
+    // produtor declarou de onde veio: `aderecosDoAviso` devolve `null` para os
+    // outros avisos, e o toast sai como sempre saiu (#4094).
     toast(title, {
-      description: body,
+      // A cor nunca é o único sinal: o nome da rede abre o corpo do aviso
+      // ("WhatsApp · Foto"), em texto, para quem não distingue a faixa. O
+      // prefixo NÃO depende de `corPorCanal`: com a cor ligada ou desligada,
+      // todo aviso de conversa de rede conhecida passa a abrir com o nome dela
+      // — é a parte da #4094 que muda o que quem já usa vê.
+      description: input.canal == null ? body : descricaoComCanal(body, input.canal, idioma),
       action: href
         ? {
             label: traduzir("Abrir conversa", idioma),
@@ -40,17 +82,28 @@ export function entregarAviso(input: EntregarAvisoInput): void {
             },
           }
         : undefined,
+      ...(aderecosDoAviso(input.canal, input.corPorCanal !== false) ?? {}),
     });
   }
   if (canalLigado(input.category, "push")) {
-    emitNotification({
-      kind: input.kind,
-      title,
-      body,
-      tag: input.tag,
-      href: input.href,
-      icon: input.icon,
-      force: true,
-    });
+    // O toast fica dentro do app aberto; a bandeja aparece fora dele e segue a
+    // opção da empresa, como o push do servidor (`./web_push.ts`).
+    void (async () => {
+      const conteudo = input.conteudo ?? (await conteudoDaBandeja());
+      const bandeja = redigirParaATelaBloqueada(
+        { title: input.title, body: input.body, corpoSemPrevia: input.corpoSemPrevia, icon: input.icon },
+        conteudo,
+        idioma,
+      );
+      emitNotification({
+        kind: input.kind,
+        title: traduzir(bandeja.title, idioma),
+        body: traduzir(bandeja.body, idioma),
+        tag: input.tag,
+        href: input.href,
+        icon: bandeja.icon,
+        force: true,
+      });
+    })();
   }
 }

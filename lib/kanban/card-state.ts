@@ -14,6 +14,14 @@ export interface CardInput {
   id: string;
   title: string;
   valueCents: number | null;
+  /**
+   * A mensalidade do negócio (fatia 1 da #3602) — e `null` quando não há.
+   * É campo PRÓPRIO, e não uma soma com `valueCents`: o card mostra as duas
+   * parcelas lado a lado, e quem monta o card não decide número nenhum.
+   */
+  recurringValueCents?: number | null;
+  /** Periodicidade da recorrência (`monthly` na v1). */
+  recurringPeriod?: string | null;
   currency: string | null;
   owner: OwnerDisplay;
   /** Nome do estágio atual — o "3d em Negociação" do rodapé. */
@@ -72,6 +80,8 @@ export function buildCardInput(
     | "id"
     | "title"
     | "value_cents"
+    | "recurring_value_cents"
+    | "recurring_period"
     | "currency"
     | "tags"
     | "stage_changed_at"
@@ -80,6 +90,8 @@ export function buildCardInput(
     | "owner_user_id"
     | "owner_agent_id"
     | "owner_agent"
+    | "owner_user_name"
+    | "owner_user_removed"
     | "next_action"
     | "score"
   >,
@@ -116,6 +128,10 @@ export function buildCardInput(
     id: lead.id,
     title: lead.title,
     valueCents: lead.value_cents,
+    // Sem `?? 0`: "não tem mensalidade" e "mensalidade zero" são estados
+    // diferentes, e o card só desenha o segundo trecho quando o primeiro não é.
+    recurringValueCents: lead.recurring_value_cents ?? null,
+    recurringPeriod: lead.recurring_period ?? null,
     currency: lead.currency,
     owner: resolveLeadOwner(lead, opts.ownerNames),
     stageName: opts.stageName,

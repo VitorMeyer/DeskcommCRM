@@ -1,0 +1,26 @@
+/** Vocabulário do operador, compartilhado pelo painel e pelas recusas da rota. */
+export const MOTIVOS_DO_SERVICO: Readonly<Record<string, string>> = {
+  service_not_found: "Serviço não encontrado.",
+  service_inactive: "Este serviço não está ativo para novas reservas.",
+  outside_schedule: "Fora da programação deste serviço.",
+  outside_booking_window: "Fora do período permitido para reservar.",
+  schedule_ambiguous: "Há horários sobrepostos na programação. Confira a configuração.",
+  availability_unverified: "Disponibilidade não verificada. Confira a conexão do calendário.",
+  publication_unavailable: "O calendário de destino não está disponível. Confira a conexão.",
+  blocked: "Bloqueado para novas reservas. As reservas existentes permanecem.",
+  capacity_reached: "A capacidade deste horário foi atingida.",
+  professional_not_eligible: "Este profissional não está habilitado para o serviço.",
+  professional_unavailable: "Nenhum profissional habilitado está disponível neste horário.",
+  resource_unavailable: "Um recurso necessário está indisponível neste horário.",
+  service_stale: "A configuração mudou. Consulte os horários novamente.",
+  /** Lugar (mesa, camarote, quadra): o serviço tem lugares e a reserva precisa dizer qual. */
+  space_required: "Escolha o lugar desta reserva.",
+  space_not_eligible: "Este lugar não é oferecido por este serviço.",
+  space_unavailable: "Este lugar está bloqueado neste período.",
+  space_capacity_reached: "O lugar já está ocupado neste período.",
+  party_exceeds_space_capacity: "O número de pessoas passa da capacidade deste lugar.",
+  party_invalid: "O número de pessoas precisa estar entre 1 e 100000.",
+  service_resource_in_use: "Este recurso já está em uso; o tipo dele não pode ser trocado.",
+  service_resource_invalid: "Nome, capacidade, tipo ou área do recurso inválidos.",
+  service_resource_not_found: "Recurso não encontrado. Atualize a tela e tente de novo.",
+};

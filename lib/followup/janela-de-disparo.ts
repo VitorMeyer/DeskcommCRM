@@ -59,8 +59,15 @@ export interface EntradaDaJanela {
   agora?: Date;
 }
 
-/** `null` = a conversa não tem canal associado (não há janela do canal a consultar). */
-async function canalDaConversa(
+/**
+ * `null` = a conversa não tem canal associado (não há janela do canal a consultar).
+ *
+ * Exportada porque o freio de ritmo (`ritmo-do-texto-fixo.ts`, aplicado em
+ * `enviar-texto-fixo.ts`) precisa do MESMO canal que a janela consulta. Dois
+ * leitores com a mesma pergunta divergem no dia em que um deles passa a
+ * considerar o canal arquivado e o outro não.
+ */
+export async function canalDaConversa(
   admin: SupabaseClient,
   organizationId: string,
   conversationId: string,
@@ -83,8 +90,12 @@ async function canalDaConversa(
  * espelho em Supabase de `followupPublicadoDoEnrollment`
  * (`lib/agent-engine/agent/janela-de-followup.ts`, que fala `pg`): as MESMAS
  * três leituras, com o mesmo desfecho `null` quando agent/version não existe.
+ *
+ * Exportada porque a escolha de envio com compromisso (#3813) lê a MESMA
+ * configuração (`quando_ha_compromisso`, ao lado de `send_window`): duas
+ * leituras da mesma pergunta divergem no dia em que só uma for atualizada.
  */
-async function followupPublicado(
+export async function followupPublicadoSupabase(
   admin: SupabaseClient,
   organizationId: string,
   enrollmentId: string,
@@ -151,7 +162,7 @@ export async function decidirAdiamentoPorJanela(
   );
   const knobs = sessionId === null ? null : await knobsDoCanal(admin, entrada.organizationId, sessionId);
 
-  const followup = await followupPublicado(admin, entrada.organizationId, entrada.enrollmentId);
+  const followup = await followupPublicadoSupabase(admin, entrada.organizationId, entrada.enrollmentId);
   let fuso: string | null = null;
   if (followup !== null) {
     const { data: org, error: falhaOrg } = await admin

@@ -17,6 +17,10 @@
  *
  *     Responder aqui não chega ao cliente — abra o link para responder.
  *
+ * Com a opção «Responder casos por este WhatsApp» ligada, a última linha dá
+ * lugar às instruções de `RESPONDER <uuid> <resposta ou decisão>` e
+ * `PERGUNTAR <uuid> <pergunta ao cliente>` (ver `montarAvisoDeCaso`).
+ *
  * ## As decisões, cada uma com o motivo
  *
  * **A marca vem de FORA.** Quem resolve é `marcaDaSaida(orgId)`
@@ -42,10 +46,15 @@
  * **Linha sem conteúdo não aparece.** Um `Assunto: ` vazio AFIRMA que há assunto
  * e que ele é nada. A ausência da linha é a verdade disponível.
  *
- * **A última linha não é enfeite.** O número do suporte só RECEBE — o corte da
- * ingestão (`lib/escalacao/numero-interno-de-aviso.ts`) descarta tudo o que
- * chega dele, de propósito. Sem essa linha, a primeira resposta da equipe vai
- * para o vazio e ninguém descobre por quê.
+ * **A última linha não é enfeite.** Com a opção desligada (o padrão), o número
+ * do suporte só RECEBE — o corte da ingestão
+ * (`lib/escalacao/numero-interno-de-aviso.ts`) descarta tudo o que chega dele,
+ * de propósito. Sem essa linha, a primeira resposta da equipe vai para o vazio
+ * e ninguém descobre por quê.
+ *
+ * **Os comandos levam o id completo.** Com a opção ligada, uma resposta do
+ * suporte precisa apontar para o caso exato, e uma pergunta adicional volta ao
+ * cliente pelo agente.
  */
 import { tipoDeCasoLabel } from "@/lib/ai/case-copy";
 import { traduzir } from "@/lib/i18n/dicionario";
@@ -68,10 +77,15 @@ export interface AvisoDeCaso {
   title: string | null;
   summary: string | null;
   blocker: string | null;
+  /** Id completo do caso — o comando do WhatsApp precisa apontar sem ambiguidade. */
+  caseId: string;
   /** `contacts.name` inteiro — o corte para o primeiro nome é feito aqui. */
   nomeDoCliente: string | null;
   /** O link já montado pelo servidor. É o ÚNICO link do texto. */
   link: string;
+  /** Só ensina comandos quando a organização habilitou o opt-in. */
+  respostaWhatsappHabilitada?: boolean;
+  atualizacao?: { eventId: string; info: string; ask: string };
 }
 
 /**
@@ -95,7 +109,7 @@ export function montarAvisoDeCaso(aviso: AvisoDeCaso): string {
   const t = (texto: string): string => traduzir(texto, aviso.idioma);
   const failSafe = aviso.source === "guardrail_autofallback";
 
-  const linhas: string[] = [`🔔 ${aviso.marca}: ${t("novo caso esperando você")}`, ""];
+  const linhas: string[] = [`🔔 ${aviso.marca}: ${t(aviso.atualizacao ? "atualização do caso esperando você" : "novo caso esperando você")}`, ""];
 
   linhas.push(`${t("Tipo")}: ${t(tipoDeCasoLabel(aviso.kind ?? "outro"))}`);
 
@@ -112,18 +126,33 @@ export function montarAvisoDeCaso(aviso: AvisoDeCaso): string {
   const precisa = sanitizarTextoDoLead(aviso.summary, TETOS_DO_TEXTO_DO_LEAD.summary);
   if (precisa) {
     // A ETIQUETA é a defesa barata contra phishing no caso de fail-safe: ali o
-    // `summary` é a própria frase que a IA ia mandar ao cliente, e sem a
-    // etiqueta ela chega à equipe com cara de afirmação do sistema. Declarada
-    // como citação, ela volta a ser o que é.
-    if (failSafe) linhas.push(t("(resumo escrito pela IA a partir da conversa)"));
+    // `summary` é montado sem revisão — trecho copiado da conversa (#3725) ou a
+    // frase barrada da IA — e sem a etiqueta chega à equipe com cara de
+    // afirmação do sistema. Declarado como citação, volta a ser o que é.
+    if (failSafe) linhas.push(t("(montado automaticamente; confira na conversa)"));
     linhas.push(`${t("O que o cliente precisa")}: ${precisa}`);
   }
 
   const travou = sanitizarTextoDoLead(aviso.blocker, TETOS_DO_TEXTO_DO_LEAD.blocker);
   if (travou) linhas.push(`${t("Por que a IA travou")}: ${travou}`);
 
+  if (aviso.atualizacao) {
+    const pergunta = sanitizarTextoDoLead(aviso.atualizacao.ask, TETOS_DO_TEXTO_DO_LEAD.blocker);
+    const resposta = sanitizarTextoDoLead(aviso.atualizacao.info, TETOS_DO_TEXTO_DO_LEAD.summary);
+    if (pergunta) linhas.push(`${t("Pergunta da equipe")}: ${pergunta}`);
+    if (resposta) linhas.push(`${t("Nova informação do cliente")}: ${resposta}`);
+  }
   linhas.push("", `${t("Abrir")}: ${aviso.link}`, "");
-  linhas.push(t("Responder aqui não chega ao cliente — abra o link para responder."));
+  const ciclo = aviso.atualizacao ? `ATUALIZACAO ${aviso.atualizacao.eventId} ` : "";
+  if (aviso.respostaWhatsappHabilitada) {
+    linhas.push(t("Para orientar a IA sem falar diretamente com o cliente, envie:"));
+    linhas.push(`RESPONDER ${aviso.caseId} ${ciclo}<resposta ou decisão>`);
+    linhas.push(t("Para pedir que a IA esclareça algo com o cliente, envie:"));
+    linhas.push(`PERGUNTAR ${aviso.caseId} ${ciclo}<pergunta ao cliente>`);
+    linhas.push(t("A IA usa sua orientação e o histórico para continuar o atendimento."));
+  } else {
+    linhas.push(t("Responder aqui não chega ao cliente — abra o link para responder."));
+  }
 
   return linhas.join("\n");
 }
@@ -151,6 +180,8 @@ export function montarAvisoDeTeste(entrada: {
   idioma: Idioma;
   /** O link já montado pelo servidor — a lista de casos desta instalação. */
   link: string;
+  /** Com a opção ligada, o teste ensina que a resposta ao AVISO DO CASO funciona. */
+  respostaWhatsappHabilitada?: boolean;
 }): string {
   const t = (texto: string): string => traduzir(texto, entrada.idioma);
   return [
@@ -164,6 +195,10 @@ export function montarAvisoDeTeste(entrada: {
     "",
     `${t("Abrir")}: ${entrada.link}`,
     "",
-    t("Responder aqui não chega ao cliente — abra o link para responder."),
+    entrada.respostaWhatsappHabilitada
+      ? t(
+          "Para orientar a IA, responda ao aviso de um caso com RESPONDER ou PERGUNTAR, o ID do caso e a sua mensagem. Responder a esta mensagem de teste não chega a ninguém.",
+        )
+      : t("Responder aqui não chega ao cliente — abra o link para responder."),
   ].join("\n");
 }

@@ -10,6 +10,7 @@ import { fetchWahaMedia } from "@/lib/messaging/media/waha-source";
 import { getWahaClient } from "@/lib/waha/client";
 import { wahaSendPlanFor } from "@/lib/waha/media-send";
 import {
+  numeroTemContaNoWhatsapp,
   resolveCanonicalCusChatId,
   resolvePhoneJidDigitsForCall,
   resolveWhatsappIdForContactCard,
@@ -21,10 +22,11 @@ import {
   parseWahaMessageId,
   wahaEchoExternalIds,
 } from "@/lib/waha/message-id";
-import { resolveWahaChatId } from "@/lib/waha/send";
+import { consultarNomeDaAgenda } from "@/lib/contacts/nome-da-agenda";
+import { marcarConversaComoLida, resolveWahaChatId } from "@/lib/waha/send";
 import type { FetchedMedia } from "@/lib/messaging/media/types";
 import { DETALHE_CREDENCIAL_RECUSADA } from "../health";
-import type { ChannelAdapter, ChannelHealth, OutboundEnvelope, RecipientInput } from "../types";
+import type { ChannelAdapter, ChannelHealth, OutboundEnvelope, PublishStatusInput, RecipientInput } from "../types";
 
 /**
  * O HTTP que o WAHA devolveu, lido do PREFIXO da mensagem de erro.
@@ -153,6 +155,35 @@ export const wahaAdapter: ChannelAdapter = {
   },
 
   /**
+   * `check-exists` em todas as grafias; transporte não configurado é `null`
+   * ("não deu para saber"), nunca `false`.
+   */
+  async numeroTemConta(input: { sessionRef: string; phone: string }): Promise<boolean | null> {
+    const client = getWahaClient();
+    if (!client) return null;
+    return numeroTemContaNoWhatsapp(client, input.sessionRef, input.phone);
+  },
+
+  /**
+   * Agenda do aparelho primeiro (`name`), apelido do perfil se a agenda não
+   * tiver. Transporte ausente é `null` — a varredura carimba sem tratar como
+   * "não existe".
+   */
+  async resolveAddressBookName(input: {
+    sessionRef: string;
+    phone: string | null;
+    lid: string | null;
+  }): Promise<{ agenda: string | null; perfil: string | null } | null> {
+    const client = getWahaClient();
+    if (!client) return null;
+    return consultarNomeDaAgenda(
+      (contactId) => client.getContact(input.sessionRef, contactId),
+      input.phone,
+      input.lid,
+    );
+  },
+
+  /**
    * "digitando…" no aparelho do cliente, antes da 1ª bolha do turno da IA.
    *
    * Transporte não configurado é NOOP, não erro — mesmo critério do `send`
@@ -173,6 +204,13 @@ export const wahaAdapter: ChannelAdapter = {
   }): Promise<void> {
     const { client, chatId, messageId } = enderecoDaMensagem(input);
     await client.editMessage(input.sessionRef, chatId, messageId, input.text);
+  },
+
+  async sendReaction(input: { sessionRef: string; recipient: string | null; externalId: string; emoji: string }): Promise<{ externalId: null }> {
+    const { client, messageId } = enderecoDaMensagem(input);
+    await client.sendReaction(input.sessionRef, messageId, input.emoji);
+    // O WAHA não retorna id próprio: o webhook é a fonte da linha persistida.
+    return { externalId: null };
   },
 
   async revokeMessage(input: {
@@ -231,6 +269,24 @@ export const wahaAdapter: ChannelAdapter = {
     }
   },
 
+  /**
+   * Uma PÁGINA da agenda do aparelho pareado (`GET /api/contacts/all`) — #2736.
+   *
+   * Só quem conversa com um aparelho de verdade tem esta lista do lado de lá,
+   * então só este adapter implementa o método: quem chama testa a presença
+   * dele em vez de perguntar QUAL provider é. A ordenação estável que faz o
+   * offset andar sem pular nem repetir, e a tolerância de formato, moram no
+   * método do cliente (`listarAgendaDoAparelho`), com o próprio contrato.
+   */
+  async listPhonebook(input: { sessionRef: string; limit: number; offset: number }) {
+    const client = getWahaClient();
+    if (!client) throw new Error("waha_not_configured");
+    return client.listarAgendaDoAparelho(input.sessionRef, {
+      limit: input.limit,
+      offset: input.offset,
+    });
+  },
+
   async listGroups(input: { sessionRef: string }) {
     const client = getWahaClient();
     if (!client) throw new Error("waha_not_configured");
@@ -260,6 +316,56 @@ export const wahaAdapter: ChannelAdapter = {
     // mesmo tipo dos dois lados, e reconstruí-lo faria a próxima adição de
     // campo sumir em silêncio aqui no meio.
     return fetchWahaMedia(input.url, input.hintMime ?? null);
+  },
+
+  /**
+   * Status (#3397): o público vira JID aqui, não em quem publica.
+   *
+   * O provedor endereça Status por `@c.us` — o telefone em dígitos mais o
+   * sufixo do WhatsApp —, e essa é a única parte da operação que é do CANAL:
+   * a lista chega neutra (só dígitos) e sai no dialeto do transporte. Quem
+   * está acima não precisa saber que o sufixo existe.
+   *
+   * `{ tipo: "todos" }` sai SEM lista: no provedor, "sem `contacts`" é o número
+   * inteiro. É por isso que o público é uma escolha declarada, e não um array
+   * possivelmente vazio (ver `PublicoDoStatus`).
+   *
+   * A recusa sai daqui em português, porque o `waha_status_N` só diz algo a quem
+   * conhece o transporte. Com `todos`, 400 e 422 são o mesmo fato: não há lista
+   * de contatos para o provedor usar, por acervo desligado (400) ou ainda vazio
+   * (422, `No participants to send status`).
+   *
+   * Sem HTTP legível, ou com 5xx, ninguém sabe se saiu: o teto de mídia pode
+   * vencer com o provedor ainda publicando, lote a lote. Daí `incerto`, e não
+   * erro (ver o contrato em `../types`).
+   */
+  async publishStatus(
+    input: PublishStatusInput,
+  ): Promise<{ externalId: string | null; incerto?: true }> {
+    const client = getWahaClient();
+    if (!client) throw new Error("waha_not_configured");
+    try {
+      const res = await client.sendStatusImage(input.sessionRef, {
+        mimetype: input.imagem.mime,
+        data: input.imagem.base64,
+        ...(input.legenda ? { caption: input.legenda } : {}),
+        ...(input.publico.tipo === "contatos"
+          ? { contacts: input.publico.numeros.map((numero) => `${numero}@c.us`) }
+          : {}),
+      });
+      return { externalId: parseWahaMessageId(res) };
+    } catch (erro) {
+      const http = statusHttpDoErroWaha(erro instanceof Error ? erro.message : "");
+      if (http === null || http >= 500) return { externalId: null, incerto: true };
+      if (input.publico.tipo === "todos" && (http === 400 || http === 422)) {
+        throw new Error(
+          "publico_indisponivel: o WhatsApp não tem a lista de contatos deste número. Confira se \"Guardar histórico\" está ligado na Central de Conexões. Se o número foi pareado antes disso, a lista pode ainda não existir: informe os contatos um a um.",
+        );
+      }
+      throw new Error(
+        `publicacao_recusada: o WhatsApp recusou esta publicação (HTTP ${http}). Confira a imagem e a conexão do número.`,
+      );
+    }
   },
 
   async send(envelope: OutboundEnvelope): Promise<{ externalId: string | null }> {
@@ -308,6 +414,25 @@ export const wahaAdapter: ChannelAdapter = {
         envelope.replyToExternalId ? idCompletoDaMensagem(envelope.replyToExternalId, to) : null,
       );
     }
+
+    // O visto azul no aparelho do cliente (issue #2981): responder sem ter
+    // "lido" é o que denuncia automação. Vem DEPOIS de o transporte aceitar a
+    // mensagem, no MESMO endereço resolvido do envio — marcar outro deixaria a
+    // conversa respondida sem visto —, e o helper falha macio: a resposta já
+    // saiu, e um recibo de leitura que falha nunca custa a mensagem.
+    //
+    // `void`, e não `await`: o pedido do visto sai aqui mesmo, logo depois do
+    // aceite, mas NÃO segura o retorno. Quem chama só grava o `external_id`
+    // depois que este `send` volta, e o `message.ack` do webhook encontra a
+    // linha SÓ por esse id (`handleAck` em `lib/waha/ingest.ts`): um ack de
+    // "entregue" que chegasse durante o visto se perderia, e a mensagem ficaria
+    // em "enviada" (o efeito descrito em `session-reconciler.ts`). O helper
+    // nunca rejeita, então não há rejeição solta.
+    void marcarConversaComoLida({
+      organizationId: envelope.organizationId,
+      sessionName: envelope.sessionRef,
+      chatId: to,
+    });
 
     return { externalId: parseWahaMessageId(res) };
   },

@@ -1,4 +1,7 @@
 import type { Lead } from "@/lib/types/leads";
+import { diaDeHojeLocal } from "@/lib/ai/pacing-knobs";
+import { SEM_CATEGORIA } from "@/lib/leads/motivos-de-perda-do-funil";
+import { termoSemAcento } from "@/lib/inbox/termo-de-busca";
 import { cardTemMarcador, cardTemTodasNaMesmaCaixa } from "@/lib/kanban/marcadores-do-card";
 import {
   type ModoDeEtiqueta,
@@ -158,8 +161,29 @@ export function applyFilters(
   f: LeadFilters,
   contexto?: ContextoDosFiltros,
 ): Lead[] {
-  const today = new Date().toISOString().slice(0, 10);
-  const search = f.search?.trim().toLowerCase() ?? "";
+  // O "hoje" de quem olha o funil — NÃO o dia UTC (#2935). `toISOString()`
+  // adianta o dia a oeste, e depois das 21h em Brasília "Apenas atrasados"
+  // marcava como vencido o negócio que fecha HOJE (`expected_close_date >= today`
+  // deixava de excluí-lo). A mesma conta que o resto do produto usa.
+  const today = diaDeHojeLocal();
+  // ─── A BUSCA DO FUNIL IGNORA ACENTO (#3918, fatia 2) ────────────────────
+  //
+  // Aqui o termo e o texto do card eram só `.toLowerCase()`: "andreia" não
+  // achava "Andréia", "joao" não achava "João" — o mesmo buraco que a busca do
+  // inbox tinha e que a #3924 fechou no servidor. O funil filtra no CLIENTE,
+  // então não há coluna gerada para consultar: a normalização é a MESMA de
+  // `lib/inbox/termo-de-busca.ts`, aplicada dos DOIS lados (termo e card), e é
+  // isso que faz a simetria — termo com acento acha nome sem acento e vice-versa.
+  //
+  // O custo é uma normalização NFD por card a cada tecla. A lista do funil é a
+  // do quadro (milhares, não milhões) e o filtro já rodava por card; o pior caso
+  // conhecido do repo é ~3.900 negócios. Se um dia pesar em perfil, o lugar de
+  // consertar é pré-computar o texto do card, não voltar a comparar com acento.
+  const search = termoSemAcento(f.search?.trim() ?? "");
+  // "(11) 99999-8888" tem de achar o "+5511999998888" gravado: busca feita só de
+  // dígitos e pontuação de telefone compara por dígitos. Texto com letra não
+  // entra aqui, senão "Pedido 2" casaria todo telefone com um 2.
+  const buscaDeTelefone = /^[\d\s()+.-]+$/.test(search) ? search.replace(/\D/g, "") : "";
   // Fora do `filter`: a escolha de E/OU é do filtro, não do card, e calculá-la a
   // cada linha pagaria uma normalização por card — a lista do funil é pequena
   // hoje e não precisa de um laço que cresce com ela.
@@ -206,7 +230,20 @@ export function applyFilters(
     if (f.lostCategory) {
       const motivo = l.lost_reason?.trim() ?? "";
       const categoria = motivo ? contexto?.categoriaDo?.(motivo) : undefined;
-      if (categoria !== f.lostCategory) return false;
+      /**
+       * MOTIVO SEM CATEGORIA É ALCANÇÁVEL (#4437). Antes, a categoria vazia não
+       * casava com opção nenhuma do filtro: os motivos administrativos ("É
+       * fornecedor", "Card duplicado") ficavam fora de QUALQUER recorte por
+       * categoria — o buraco que a tela de Funis chamava de "sem categoria" e o
+       * filtro não sabia procurar. O sentinela é o rótulo explícito do relatório,
+       * então filtrar e ler o relatório passam a falar do mesmo balde.
+       */
+      if (f.lostCategory === SEM_CATEGORIA) {
+        // Só quem TEM motivo e ele não tem categoria: negócio perdido sem
+        // motivo registrado não está "sem categoria", está sem dado — e
+        // misturar os dois faria o balde do relatório mentir.
+        if (!motivo || categoria) return false;
+      } else if (categoria !== f.lostCategory) return false;
     }
     // As TRÊS caixas de marcador (negócio, contato e conversa) — ver
     // lib/kanban/marcadores-do-card.ts. Só `l.tags` deixava o marcador escrito
@@ -215,7 +252,8 @@ export function applyFilters(
     if (!passaMarcador(l)) return false;
     if (
       search &&
-      !`${l.title} ${l.description ?? ""}`.toLowerCase().includes(search)
+      !termoSemAcento(`${l.title} ${l.description ?? ""} ${l.contact_phone ?? ""}`).includes(search) &&
+      !(buscaDeTelefone && (l.contact_phone ?? "").replace(/\D/g, "").includes(buscaDeTelefone))
     )
       return false;
     // O LIMITE DE VALOR SÓ SE COMPARA COM A MOEDA EM QUE FOI ESCRITO (#1531).

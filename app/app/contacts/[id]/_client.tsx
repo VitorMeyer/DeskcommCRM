@@ -30,47 +30,60 @@ import {
   useMarkPersonalContact,
   useUnmarkPersonalContact,
 } from "@/hooks/contacts/usePersonalContact";
+import {
+  useMarkAlwaysHumanContact,
+  useUnmarkAlwaysHumanContact,
+} from "@/hooks/contacts/useAlwaysHumanContact";
+import { useDesfazerSemInteresse } from "@/hooks/contacts/useSemInteresse";
+import { BotaoMarcarSemInteresse } from "@/components/contacts/BotaoMarcarSemInteresse";
+import { recusaRegistrada } from "@/lib/lgpd/recusa-registrada";
+import { lerRecusaSemInteresse } from "@/lib/lgpd/sem-interesse";
 import { useHierarquiaDoAnuncio } from "@/hooks/contacts/useHierarquiaDoAnuncio";
+import { useContactTagVocabulary } from "@/hooks/contacts/useContactTagVocabulary";
 import { useAuth } from "@/hooks/auth/AuthProvider";
 import { useDefaultPipeline } from "@/hooks/pipelines/useDefaultPipeline";
-import { camposDoFunil } from "@/lib/leads/campos-do-funil";
-import { ROLE_RANK } from "@/lib/auth/types";
+import { camposDoFunil, camposPorEscopo } from "@/lib/leads/campos-do-funil";
+import { canonicalTagsDoFunil } from "@/lib/contacts/etiquetas";
+import { ROLE_RANK, roleAtLeast } from "@/lib/auth/types";
 import { TimelineView } from "@/components/contacts/TimelineView";
 import { EditContactDialog } from "@/components/contacts/EditContactDialog";
+import { JuntarComOutraFicha } from "@/components/contacts/JuntarComOutraFicha";
+import { CartaoDaCarteira } from "@/components/contacts/CartaoDaCarteira";
 import { AnonymizeDialog } from "@/components/contacts/AnonymizeDialog";
+import { NiveisDaOrigem } from "@/components/contacts/NiveisDaOrigem";
 import { PropostasDeDado } from "@/components/contacts/PropostasDeDado";
 import { RoteirosDoContato } from "@/components/contacts/RoteirosDoContato";
+import { UltimasComprasDoContato } from "@/components/contacts/UltimasCompras";
 import { ConversaNoDossie } from "@/components/kanban/ConversaNoDossie";
-import { rotuloDoContato } from "@/lib/contacts/rotulo-do-contato";
-import { origemDoContato } from "@/lib/leads/origem-do-contato";
+import { nomeDoContato, rotuloParaAEquipe } from "@/lib/contacts/rotulo-do-contato";
+import { ORIGEM_AGENDA_DO_CELULAR, origemDoContato } from "@/lib/leads/origem-do-contato";
 import { phoneForDisplay } from "@/lib/channels/phone-variants";
+import { TelefonesDaFicha } from "@/components/contacts/TelefonesDaFicha";
 import { DialButton } from "@/components/voice/DialButton";
+import { ListaDeLinks } from "@/components/contacts/ListaDeLinks";
+import { AcessosMcpDoContato } from "@/components/contacts/AcessosMcpDoContato";
+import { PessoaDoContato } from "@/components/crm-b2b/PessoaDoContato";
+import { linksParaExibir } from "@/lib/leads/links-de-contato";
+import { DiagnosticoDoContato } from "@/components/contacts/DiagnosticoDoContato";
+import { podeEditarDiagnostico } from "@/lib/contacts/diagnostico-do-contato";
 
 interface Props {
   contactId: string;
   /** Painéis de módulo de dados que declaram referência a contato. Resolvido no servidor. */
   paineisDeModulo?: { modulo: string; objeto: string }[];
+  /** Módulo opcional `mcp_por_agente` ligado (doc 252). Ausente = desligado. */
+  acessosMcp?: boolean;
+  /** Módulo opcional `crm_b2b` ligado (doc 68, issue #3198). Ausente = desligado. */
+  b2b?: boolean;
 }
 
-/**
- * Um nível da origem, ou nada.
- *
- * Escondido quando não há valor, em vez de mostrar "—": quatro travessões
- * seguidos leem como cadastro quebrado, e não como "este contato não veio de
- * campanha". O rótulo chega já traduzido porque `t()` com argumento não literal
- * escapa do guardião de espanhol.
- */
-function NivelDaOrigem({ rotulo, valor }: { rotulo: string; valor: string | null }) {
-  if (!valor) return null;
-  return (
-    <div>
-      <dt className="text-xs uppercase text-muted-foreground">{rotulo}</dt>
-      <dd className="mt-1 break-words">{valor}</dd>
-    </div>
-  );
-}
 
-export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) {
+export function ContactDetailClient({
+  contactId,
+  paineisDeModulo = [],
+  acessosMcp = false,
+  b2b = false,
+}: Props) {
   const localeDaData = useLocaleDeData();
   const t = useT();
   const q = useContact(contactId);
@@ -79,8 +92,17 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
   // As DEFINIÇÕES continuam no funil (`crm_pipelines.settings.fields[]`) — só o
   // VALOR mora no contato. `camposDoFunil` é o mesmo leitor que o Kanban usa.
   const pipelineQuery = useDefaultPipeline(Boolean(activeOrg));
+  // As duas fontes do autocompletar de etiquetas (issue #2732). Os dois hooks
+  // ficam ANTES dos early returns pelo mesmo motivo do `desbloquear` abaixo:
+  // chamá-los depois mudaria a ordem dos hooks entre renderizações.
+  const vocabularioDeEtiquetas = useContactTagVocabulary(activeOrg?.orgId ?? null);
+  const canonicalTags = canonicalTagsDoFunil(pipelineQuery.data?.pipeline.settings ?? null);
   const [editOpen, setEditOpen] = useState(false);
   const [anonOpen, setAnonOpen] = useState(false);
+  // Juntar com outra ficha (spec 31, PR A): gestor, mesmo gate da fusão. Fica
+  // antes dos early returns pelo mesmo motivo dos hooks acima.
+  const podeJuntar = roleAtLeast(activeOrg?.role, "manager");
+  const [juntarOpen, setJuntarOpen] = useState(false);
   // Desfazer o descadastro é o override da regra W-02 — só admin, e auditado.
   // O hook fica ANTES dos early returns: chamá-lo depois mudaria a ordem dos
   // hooks entre renderizações e o React reprova.
@@ -89,6 +111,14 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
   // mesmo motivo do `desbloquear` acima.
   const marcarPessoal = useMarkPersonalContact(contactId);
   const desmarcarPessoal = useUnmarkPersonalContact(contactId);
+  // A marca PERMANENTE "sempre atendimento humano" (issue 2379). Os hooks
+  // ficam aqui pelos MESMOS motivos dos de pessoal: ordem de hooks estável e
+  // efeito que o Inbox enxerga.
+  const marcarSempreHumano = useMarkAlwaysHumanContact(contactId);
+  const desmarcarSempreHumano = useUnmarkAlwaysHumanContact(contactId);
+  // "Não tem interesse" (decisão D3): o desfazer da aba LGPD. O marcar mora em
+  // `BotaoMarcarSemInteresse`, o mesmo do painel da conversa.
+  const desfazerSemInteresse = useDesfazerSemInteresse(contactId);
 
   /*
     Pede o nome da campanha SÓ quando há um anúncio e ainda não há nome.
@@ -105,7 +135,8 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
   const temAnuncio =
     typeof metadataDoContato.ad_id === "string" && metadataDoContato.ad_id.trim() !== "";
   const jaTemNome = typeof metadataDoContato.campaign_name === "string";
-  const hierarquia = useHierarquiaDoAnuncio(contactId, temAnuncio && !jaTemNome);
+  const origemGoogle = (metadataDoContato.ad_platform ?? q.data?.data.source) === "google_ads";
+  const hierarquia = useHierarquiaDoAnuncio(contactId, !origemGoogle && temAnuncio && !jaTemNome);
 
   if (q.isLoading) {
     return (
@@ -125,6 +156,7 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
   }
 
   const contact = q.data.data;
+  const linksDoContato = linksParaExibir(contact.custom_fields);
   const isAdmin =
     (user.is_platform_admin && !user.support) || (activeOrg && ROLE_RANK[activeOrg.role] >= ROLE_RANK.admin);
   // Gerente e dono marcam/desmarcam pessoal (spec 21, decisão 1, D3) — e este
@@ -138,7 +170,19 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
   // Uma decisão, um lugar (lib/contacts/rotulo-do-contato.ts). Esta tela era
   // uma das DUAS que ignoravam o telefone: contato com número e sem nome
   // aparecia como "Sem nome" aqui e com o número no inbox.
-  const displayName = rotuloDoContato(contact, t);
+  const displayName = rotuloParaAEquipe(contact, t);
+
+  // A recusa de ofertas, lida do `consent` com a MESMA régua das guardas de envio
+  // (`recusaRegistrada`). O botão some quando já há recusa de qualquer origem: gravar
+  // outra por cima apagaria a data e a origem da primeira.
+  // A forma gravada é lida pelo módulo que a grava (`lerRecusaSemInteresse`), nunca pelo
+  // caminho do jsonb aqui na tela.
+  const recusaDeOfertas = lerRecusaSemInteresse(contact.consent);
+  const semInteresse = recusaDeOfertas !== null;
+  const recusouOfertas = recusaRegistrada(contact.consent, "marketing");
+  const podeMarcarSemInteresse =
+    (user.is_platform_admin && !user.support) ||
+    Boolean(activeOrg && ROLE_RANK[activeOrg.role] >= ROLE_RANK.agent);
 
   // Os quatro níveis que quem opera tráfego lê. O jsonb já os recebia dos dois
   // caminhos de entrada — site e clique-para-WhatsApp — e nenhuma tela o abria.
@@ -148,7 +192,7 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
   // `adset_name`, `ad_name`) são exatamente as que `origemDoContato` já lê, no
   // degrau abaixo da UTM. Uma regra de precedência só, e ela já estava escrita.
   const origem = origemDoContato(
-    hierarquia.data
+    !origemGoogle && hierarquia.data
       ? { ...(contact.source_metadata ?? {}), ...hierarquia.data }
       : contact.source_metadata,
     contact.source,
@@ -190,6 +234,18 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
             {/* Selo lido da COLUNA, nunca da etiqueta (critério 5): editar
                 etiquetas não apaga o selo — mesma regra do "Bloqueado" acima. */}
             {contact.is_personal && <Badge variant="secondary">{t("Pessoal")}</Badge>}
+            {/* O TIPO DO CONTATO (issue 3005, fatia 1): selo lido da COLUNA
+                (`contacts.contact_type`), mesma regra dos de cima — a etiqueta
+                `fornecedor` é de trabalho e removível; o selo não. Só o
+                fornecedor aparece: cliente é o padrão da coluna. */}
+            {contact.contact_type === "fornecedor" && (
+              <Badge variant="secondary">{t("Fornecedor")}</Badge>
+            )}
+            {/* A marca PERMANENTE (issue 2379): lida da COLUNA, mesma régua do
+                "Bloqueado" e do "Pessoal" — a devolução não a apaga, então o selo
+                continua a verdade mesmo quando a conversa já voltou ao automático. */}
+            {contact.ai_opt_out && <Badge variant="secondary">{t("Sempre atendimento humano")}</Badge>}
+            {semInteresse && <Badge variant="secondary">{t("Sem interesse em ofertas")}</Badge>}
             {contact.is_anonymized && <Badge variant="destructive">{t("Anonimizado")}</Badge>}
           </div>
         </div>
@@ -278,7 +334,70 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
                 </span>
               </Button>
             )}
+            {/* SEMPRE ATENDIMENTO HUMANO (issue 2379): a marca que a devolução
+                NÃO desfaz — nem a manual, nem a automática do cron. Marcar
+                confirma (a IA para de vez); remover é direto e NÃO devolve o
+                atendimento, que continua sendo gesto do botão "Devolver ao
+                automático". Mesmo gate de pessoal: decisão operacional. */}
+            {!contact.ai_opt_out && podeMarcarPessoal && (
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button
+                    variant="outline"
+                    disabled={marcarSempreHumano.isPending}
+                    className="shrink-0"
+                    data-testid="marcar-sempre-humano"
+                  >
+                    <span>{t("Marcar como sempre humano")}</span>
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>
+                      {t("Marcar este contato como sempre humano?")}
+                    </AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t("A IA deixa de responder este contato para sempre: a devolução automática e o botão de devolver ao automático passam a recusar, e a marca só sai por aqui. A conversa atual continua com a equipe.")}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>{t("Cancelar")}</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => marcarSempreHumano.mutate()}>
+                      {t("Marcar como sempre humano")}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            )}
+            {contact.ai_opt_out && podeMarcarPessoal && (
+              <Button
+                variant="outline"
+                disabled={desmarcarSempreHumano.isPending}
+                className="shrink-0"
+                data-testid="desmarcar-sempre-humano"
+                onClick={() => desmarcarSempreHumano.mutate()}
+              >
+                <span>
+                  {desmarcarSempreHumano.isPending
+                    ? t("Removendo...")
+                    : t("Remover marca de humano")}
+                </span>
+              </Button>
+            )}
+            {/* SEM INTERESSE (decisão D3): quem ouviu o "não" registra. Confirma antes,
+                porque só um administrador desfaz (aba LGPD). Não bloqueia o contato. */}
+            {!recusouOfertas && podeMarcarSemInteresse && <BotaoMarcarSemInteresse contactId={contactId} />}
             <DialButton contactId={contactId} hasPhone={!!contact.phone_number} />
+            {podeJuntar && (
+              <Button
+                variant="outline"
+                onClick={() => setJuntarOpen(true)}
+                className="shrink-0"
+                data-testid="juntar-com-outra-ficha"
+              >
+                <span>{t("Juntar com outra ficha")}</span>
+              </Button>
+            )}
             <Button variant="outline" onClick={() => setEditOpen(true)} className="shrink-0">
               <PencilSimple size={16} weight="bold" aria-hidden />
               <span>{t("Editar")}</span>
@@ -305,6 +424,7 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
         <TabsList>
           <TabsTrigger value="overview">{t("Visão geral")}</TabsTrigger>
           <TabsTrigger value="timeline">Timeline</TabsTrigger>
+          <TabsTrigger value="diagnostico">{t("Diagnóstico")}</TabsTrigger>
           {isAdmin && <TabsTrigger value="lgpd">LGPD</TabsTrigger>}
         </TabsList>
 
@@ -319,16 +439,37 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
                 <dt className="text-xs uppercase text-muted-foreground">{t("Nome")} · WhatsApp</dt>
                 <dd className="mt-1">{contact.display_name ?? "—"}</dd>
               </div>
+              {contact.address_book_name && (
+                <div>
+                  {/* Só a equipe vê: nenhuma mensagem usa este nome (PR #2439). */}
+                  <dt className="text-xs uppercase text-muted-foreground">{t("Nome na agenda do celular")}</dt>
+                  <dd className="mt-1">{contact.address_book_name}</dd>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {t("Só a equipe vê. Para usar em mensagens, copie para o nome.")}
+                  </p>
+                </div>
+              )}
               <div>
                 <dt className="text-xs uppercase text-muted-foreground">Email</dt>
                 <dd className="mt-1">{contact.email ?? "—"}</dd>
               </div>
-              <div>
-                <dt className="text-xs uppercase text-muted-foreground">{t("Telefone")}</dt>
-                <dd className="mt-1">
-                  {contact.phone_number ? phoneForDisplay(contact.phone_number) : "—"}
-                </dd>
-              </div>
+              {/*
+                Os telefones da ficha (Spec 31). Sem extra, a linha segue como hoje
+                ("Telefone", com o tipo ao lado); com extra, "Telefones" lista o
+                principal e os extras. Quem tem papel `agent` ou acima edita aqui.
+              */}
+              <TelefonesDaFicha
+                contato={contact}
+                podeEditar={Boolean(activeOrg && ROLE_RANK[activeOrg.role] >= ROLE_RANK.agent)}
+              />
+              {linksDoContato.length > 0 && (
+                <div>
+                  <dt className="text-xs uppercase text-muted-foreground">{t("Links")}</dt>
+                  <dd className="mt-1">
+                    <ListaDeLinks links={linksDoContato} />
+                  </dd>
+                </div>
+              )}
               {/*
                 A data gravada pelo "Editar contato" (e pela proposta aprovada),
                 enxergada aqui — é ela que o cron `contact-birthdays` lê para
@@ -345,6 +486,16 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
                   {contact.birthdate ? contact.birthdate.split("-").reverse().join("/") : "—"}
                 </dd>
               </div>
+              {(contact.zip_code || contact.street || contact.city || contact.state) && (
+                <div className="sm:col-span-2">
+                  <dt className="text-xs uppercase text-muted-foreground">{t("Endereço")}</dt>
+                  <dd className="mt-1">
+                    {[contact.street, contact.number, contact.complement, contact.district, contact.city, contact.state, contact.zip_code]
+                      .filter(Boolean)
+                      .join(", ")}
+                  </dd>
+                </div>
+              )}
               {/*
                 A origem sai do `source_metadata` quando ele tem algo melhor a
                 dizer, e cai na coluna `source` quando não tem. Antes esta linha
@@ -354,22 +505,18 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
               */}
               <div>
                 <dt className="text-xs uppercase text-muted-foreground">{t("Origem")}</dt>
-                <dd className="mt-1">{origem.origem}</dd>
-              </div>
-              <NivelDaOrigem rotulo={t("Campanha")} valor={origem.campanha} />
-              <NivelDaOrigem rotulo={t("Conjunto")} valor={origem.conjunto} />
-              <NivelDaOrigem rotulo={t("Anúncio")} valor={origem.anuncio} />
-              <NivelDaOrigem rotulo={t("Posicionamento")} valor={origem.posicionamento} />
-              {origem.semPosicionamentoDeAnuncio && (
-                <div>
-                  <dt className="text-xs uppercase text-muted-foreground">
-                    {t("Posicionamento")}
-                  </dt>
+                <dd className="mt-1">
+                  {origem.origem === ORIGEM_AGENDA_DO_CELULAR ? t("Agenda do celular") : origem.origem}
+                </dd>
+                {origem.inferidaPorHorario && (
                   <dd className="mt-1 text-sm text-muted-foreground">
-                    {t("A plataforma não informa o posicionamento de cada clique em anúncio.")}
+                    {t(
+                      "Provável: deduzida pelo horário do clique. A mensagem chegou sem o código do link.",
+                    )}
                   </dd>
-                </div>
-              )}
+                )}
+              </div>
+              <NiveisDaOrigem origem={origem} />
               <div>
                 <dt className="text-xs uppercase text-muted-foreground">{t("Última atividade")}</dt>
                 <dd className="mt-1">
@@ -416,9 +563,50 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
               </div>
             </dl>
           </Card>
+          {/* DE QUEM É ESTE TELEFONE (issue #3198): só com o módulo "Empresas e
+              pessoas" ligado. Desligado, nada é montado e nenhuma rota B2B é
+              chamada — a ficha fica exatamente como era. Logo abaixo dos dados do
+              contato, antes da Carteira: no B2B, "quem é e de que empresa" vem
+              antes de "quem atende". */}
+          {b2b && !contact.is_anonymized && (
+            <div className="mt-4">
+              <PessoaDoContato
+                contactId={contactId}
+                podeEditar={Boolean(
+                  (user.is_platform_admin && !user.support) ||
+                    (activeOrg && ROLE_RANK[activeOrg.role] >= ROLE_RANK.agent),
+                )}
+                podeCriarPessoa={Boolean(
+                  (user.is_platform_admin && !user.support) ||
+                    (activeOrg && ROLE_RANK[activeOrg.role] >= ROLE_RANK.agent),
+                )}
+                nomeSugerido={nomeDoContato(contact) ?? ""}
+              />
+            </div>
+          )}
+          {/* CARTEIRA DO CLIENTE (#2591): de quem é este cliente. Fica na Visão
+              geral, junto dos dados que dizem "quem é esta pessoa" — quem atende
+              responde a pergunta antes de prometer o negócio, e o seletor de dono
+              aparece para quem o servidor autoriza NAQUELE cliente: `manager`+ e o
+              Atendente que atende o cliente (#3746). Quem decide é o `pode_alterar`
+              do GET, não o papel lido aqui. Só de `agent` para cima: é o piso do
+              GET da carteira, e o `viewer` receberia 403. */}
+          {activeOrg && ROLE_RANK[activeOrg.role] >= ROLE_RANK.agent && (
+            <div className="mt-4">
+              <CartaoDaCarteira contactId={contactId} />
+            </div>
+          )}
           <div className="mt-4">
             <RoteirosDoContato contactId={contactId} />
           </div>
+          {/* AS ÚLTIMAS COMPRAS (issue #3179): a MESMA seção do painel do Inbox,
+              na ficha do contato — negócios ganhos em todos os funis, com data,
+              título, valor, campos escolhidos pela organização e atalho. */}
+          {!contact.is_anonymized && (
+            <div className="mt-4">
+              <UltimasComprasDoContato contactId={contactId} />
+            </div>
+          )}
           {/*
             O que os módulos de dados instalados guardam sobre esta pessoa. A lista vem do servidor e
             é vazia quando não há módulo com ficha de contato — então quem não instalou nada não vê
@@ -439,8 +627,72 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
           <TimelineView contactId={contactId} />
         </TabsContent>
 
+        {/* Os dados da EMPRESA que a prospecção usa (segmento, CNPJ, links,
+            diagnóstico e oferta). Lidos e gravados só pelo esquema central,
+            lib/contacts/diagnostico-do-contato.ts. */}
+        <TabsContent value="diagnostico" className="mt-4">
+          <DiagnosticoDoContato
+            key={contact.updated_at}
+            contato={contact}
+            usuarioId={user.id}
+            podeEditar={podeEditarDiagnostico(contact, user, activeOrg?.role)}
+          />
+        </TabsContent>
+
         {isAdmin && (
-          <TabsContent value="lgpd" className="mt-4">
+          <TabsContent value="lgpd" className="mt-4 space-y-4">
+            {/* Acessos OAuth do contato a servidores MCP externos (9095). */}
+            {acessosMcp && <AcessosMcpDoContato contactId={contactId} />}
+            {/* A volta da recusa "sem interesse" (decisão D3). Só a que o produto gravou:
+                a revogação vinda da captação não se desfaz por aqui. */}
+            {semInteresse && (
+              <Card className="space-y-4 p-4" data-testid="recusa-de-ofertas">
+                <div>
+                  <h2 className="text-lg font-semibold">{t("Recusa de ofertas")}</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {/* Sem data legível (`declinedAt: null`), a frase perde o "em" e a vírgula:
+                        "Recusa registrada pela equipe.", nunca "Recusa registrada em, pela equipe." */}
+                    {recusaDeOfertas?.declinedAt
+                      ? `${t("Recusa registrada em")} ${format(new Date(recusaDeOfertas.declinedAt), "dd/MM/yyyy", { locale: localeDaData })}, `
+                      : `${t("Recusa registrada")} `}
+                    {recusaDeOfertas?.origem === "conversa_de_prospeccao"
+                      ? t("na conversa da prospecção")
+                      : t("pela equipe")}
+                    {". "}
+                    {t("Este contato disse que não tem interesse e não entra em prospecção nem em campanhas.")}
+                  </p>
+                </div>
+                {/* Só administrador desfaz (a rota cobra `requireRole("admin")`): a aba
+                    LGPD inteira já só aparece para `isAdmin`. */}
+                {!contact.is_anonymized && user.support?.access_mode !== "support_readonly" && (
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        variant="outline"
+                        disabled={desfazerSemInteresse.isPending}
+                        data-testid="desfazer-sem-interesse"
+                      >
+                        {t("Desfazer recusa")}
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>{t("Desfazer a recusa de ofertas?")}</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          {t("O contato volta a poder entrar em prospecção e campanhas. O que a recusa encerrou não volta: os negócios que ela levou para Perdido continuam lá e o follow-up não recomeça. A ação fica registrada na auditoria em seu nome.")}
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>{t("Cancelar")}</AlertDialogCancel>
+                        <AlertDialogAction onClick={() => desfazerSemInteresse.mutate()}>
+                          {t("Desfazer recusa")}
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                )}
+              </Card>
+            )}
             <Card className="space-y-4 p-4">
               <div>
                 <h2 className="text-lg font-semibold">{t("Direito ao esquecimento (LGPD)")}</h2>
@@ -471,9 +723,21 @@ export function ContactDetailClient({ contactId, paineisDeModulo = [] }: Props) 
         contact={contact}
         open={editOpen}
         onOpenChange={setEditOpen}
-        customFieldDefs={camposDoFunil(pipelineQuery.data?.pipeline.settings ?? null)}
+        customFieldDefs={camposPorEscopo(
+          camposDoFunil(pipelineQuery.data?.pipeline.settings ?? null),
+          "contato",
+        )}
+        vocabulario={vocabularioDeEtiquetas.data}
+        canonicalTags={canonicalTags}
       />
       <AnonymizeDialog contactId={contactId} open={anonOpen} onOpenChange={setAnonOpen} />
+      {podeJuntar && (
+        <JuntarComOutraFicha
+          contatoAtual={contact}
+          open={juntarOpen}
+          onOpenChange={setJuntarOpen}
+        />
+      )}
     </div>
   );
 }

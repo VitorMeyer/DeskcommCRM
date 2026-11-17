@@ -20,13 +20,24 @@ import { useEditLead } from "@/hooks/kanban/useUpdateLead";
 import type { Lead } from "@/lib/types/leads";
 import { updateLeadSchema, type UpdateLeadInput } from "@/lib/schemas/leads";
 import { MOEDA_PADRAO, parseReaisToCents, simboloDaMoeda } from "@/lib/money";
+import { ContactTagsEditor } from "@/components/inbox/ContactTagsEditor";
+import { lerRecorrenciaDoFormulario } from "@/lib/leads/valor-recorrente";
 import { EcoDoValor } from "./EcoDoValor";
 
+/**
+ * As etiquetas do negócio SAÍRAM deste formulário (#2979): quem as edita é o
+ * `ContactTagsEditor`, que grava na hora em `crm_leads.tags`. Manter um
+ * `tagsRaw` aqui seria pior do que redundância — "Salvar" reenviaria a lista
+ * carregada na abertura do diálogo e DESFARIA em silêncio a etiqueta que a
+ * pessoa acabou de criar no editor.
+ */
 interface FormShape {
   title: string;
   description: string;
   valueReais: string;
-  tagsRaw: string;
+  /** Mensalidade e duração do contrato (fatia 1 da #3602), em texto. */
+  valorRecorrenteReais: string;
+  recorrenciaMeses: string;
   expected_close_date: string;
 }
 
@@ -42,6 +53,11 @@ function centsToReais(cents: number | null | undefined): string {
   return (cents / 100).toFixed(2).replace(".", ",");
 }
 
+/** Duração em meses como texto (`null` = sem prazo, que é o campo vazio). */
+function mesesComoTexto(meses: number | null | undefined): string {
+  return meses === null || meses === undefined ? "" : String(meses);
+}
+
 export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) {
   const t = useT();
   const org = useActiveOrg();
@@ -55,7 +71,8 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
       title: lead.title,
       description: lead.description ?? "",
       valueReais: centsToReais(lead.value_cents),
-      tagsRaw: (lead.tags ?? []).join(", "),
+      valorRecorrenteReais: centsToReais(lead.recurring_value_cents),
+      recorrenciaMeses: mesesComoTexto(lead.recurring_months),
       expected_close_date: lead.expected_close_date ?? "",
     },
   });
@@ -66,7 +83,8 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
         title: lead.title,
         description: lead.description ?? "",
         valueReais: centsToReais(lead.value_cents),
-        tagsRaw: (lead.tags ?? []).join(", "),
+        valorRecorrenteReais: centsToReais(lead.recurring_value_cents),
+        recorrenciaMeses: mesesComoTexto(lead.recurring_months),
         expected_close_date: lead.expected_close_date ?? "",
       });
     }
@@ -74,26 +92,49 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
   }, [open, lead.id]);
 
   async function onSubmit(values: FormShape) {
-    const tags = values.tagsRaw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
     const reais = values.valueReais.trim();
     let valueCents: number | null = null;
     if (reais.length > 0) {
-      valueCents = parseReaisToCents(reais);
+      // A MESMA moeda que o rótulo do campo mostra ao lado («Valor ($)»): é ela
+      // que decide se a vírgula é decimal ou separador de milhar (#3331).
+      valueCents = parseReaisToCents(reais, moedaDoValor);
       if (valueCents === null) {
         form.setError("valueReais", { message: t("Valor inválido") });
         return;
       }
     }
 
+    // O RECORRENTE vai SEMPRE neste formulário, como o valor único: o diálogo
+    // manda o formulário inteiro, e é isso que faz apagar o campo LIMPAR a
+    // mensalidade (o `null` explícito é o "não tem mais"). A leitura é a régua
+    // compartilhada com a criação e com o dossiê.
+    // Apagar a mensalidade de um negócio que a TINHA leva a duração junto: é a
+    // regra 1 do trio, a mesma do servidor (`recorrenciaParaGravar`). Duração
+    // digitada num negócio que nunca teve mensalidade segue sendo recusa.
+    const apagouAMensalidade =
+      lead.recurring_value_cents != null && values.valorRecorrenteReais.trim() === "";
+    const leitura = lerRecorrenciaDoFormulario(
+      values.valorRecorrenteReais,
+      apagouAMensalidade ? "" : values.recorrenciaMeses,
+      moedaDoValor,
+    );
+    if (!leitura.ok) {
+      form.setError(leitura.campo === "valor" ? "valorRecorrenteReais" : "recorrenciaMeses", {
+        message:
+          leitura.motivo === "valor_invalido"
+            ? t("Valor inválido")
+            : leitura.motivo === "duracao_invalida"
+              ? t("Duração inválida")
+              : t("Informe a mensalidade para usar a duração"),
+      });
+      return;
+    }
+
     const patch: Record<string, unknown> = {
       title: values.title.trim(),
       description: values.description.trim() ? values.description.trim() : null,
       value_cents: valueCents,
-      tags,
+      ...leitura.trio,
       expected_close_date: values.expected_close_date || null,
     };
 
@@ -109,7 +150,7 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
         leadId: lead.id,
         patch: parsed.data as UpdateLeadInput,
       });
-      toast.success(t("Lead atualizado"));
+      toast.success(t("Negócio atualizado"));
       onOpenChange(false);
     } catch {
       // toast already shown
@@ -120,7 +161,7 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t("Editar lead")}</DialogTitle>
+          <DialogTitle>{t("Editar negócio")}</DialogTitle>
           <DialogDescription>
             {t("Atualize os campos. Mover de etapa ou marcar ganho/perdido tem opções próprias.")}
           </DialogDescription>
@@ -167,9 +208,61 @@ export function EditLeadDialog({ open, onOpenChange, lead, pipelineId }: Props) 
             </div>
           </div>
 
+          {/* A MENSALIDADE (fatia 1 da #3602): o negócio de setup + mensalidade
+              aparece com os dois valores no card, e este é o lugar de mudá-los.
+              Apagar o valor recorrente limpa periodicidade e duração junto. */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <Label htmlFor="valorRecorrenteReais">
+                {t("Valor recorrente (mensal)")} ({simboloDaMoeda(moedaDoValor)})
+              </Label>
+              <Input
+                id="valorRecorrenteReais"
+                inputMode="decimal"
+                placeholder="0,00"
+                {...form.register("valorRecorrenteReais")}
+              />
+              <EcoDoValor
+                control={form.control}
+                moeda={moedaDoValor}
+                campo="valorRecorrenteReais"
+              />
+              {form.formState.errors.valorRecorrenteReais && (
+                <p className="text-xs text-error-fg">
+                  {form.formState.errors.valorRecorrenteReais.message}
+                </p>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="recorrenciaMeses">{t("Duração (meses)")}</Label>
+              <Input
+                id="recorrenciaMeses"
+                inputMode="numeric"
+                placeholder={t("sem prazo")}
+                {...form.register("recorrenciaMeses")}
+              />
+              {form.formState.errors.recorrenciaMeses && (
+                <p className="text-xs text-error-fg">
+                  {form.formState.errors.recorrenciaMeses.message}
+                </p>
+              )}
+            </div>
+          </div>
+
           <div className="space-y-2">
-            <Label htmlFor="tagsRaw">{t("Tags (separadas por vírgula)")}</Label>
-            <Input id="tagsRaw" placeholder="vip, recompra" {...form.register("tagsRaw")} />
+            {/* A etiqueta do NEGÓCIO (#2979): o MESMO editor do Inbox, gravando
+                na OUTRA caixa — `crm_leads.tags` por `PATCH /api/v1/leads/{id}`,
+                nunca o perfil do contato (`lib/types/leads.ts`). Ele grava na
+                hora, como no Inbox; por isso este formulário não carrega mais
+                o campo de texto livre que substituía a lista inteira. */}
+            <p className="text-sm font-medium">{t("Tags do negócio")}</p>
+            <ContactTagsEditor
+              entityType="lead"
+              entityId={lead.id}
+              pipelineId={pipelineId}
+              orgId={org?.orgId ?? ""}
+              tags={lead.tags ?? []}
+            />
           </div>
 
           <DialogFooter>

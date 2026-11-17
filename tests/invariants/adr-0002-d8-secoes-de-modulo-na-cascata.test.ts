@@ -28,12 +28,10 @@
  *      executável nem por `anon` nem por `authenticated` (D4, mesma régua da provisionadora).
  *
  * ─── O módulo de MENTIRA deste arquivo ────────────────────────────────────────────────────────
- * Nenhum módulo oficial declara seção hoje: honorários não tem texto livre sobre a pessoa,
- * decisão escrita na própria migration 0480, e a tabela `modulo_secoes_lgpd` nasce VAZIA (o
- * caso 1 abaixo mede isso). A seção que redige existe SÓ aqui — é o mesmo desenho da onda 1
- * (`provisionadora-de-modulo.test.ts` nasce com o conjunto vazio e prova o instrumento com
- * função de mentira): mecanismo sem consumidor ainda precisa de instrumento medido, senão o
- * dia em que o primeiro módulo declarar é o dia em que ninguém sabe se a coisa funciona.
+ * O baseline declara duas seções de cadências mesmo antes de instalar as tabelas; o
+ * mecanismo as pula por to_regclass. Honorários continua sem texto livre sobre a pessoa e
+ * sem seção própria. O caso inicial cobra esse catálogo exato. As sondas abaixo continuam
+ * medindo ausência, redação seletiva e erro alto, sem substituir as declarações reais.
  */
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -50,7 +48,15 @@ const VIZINHO = "7a5f0011-2222-4000-8000-000000000003";
 /** Anonimizado com a seção QUEBRADA declarada — tem de falhar alto. */
 const ERROU = "7a5f0011-2222-4000-8000-000000000004";
 
-const ROTULO_ESPERADO = "Cliente Anonimizado #7a5f0011"; // id::text, 8 primeiros caracteres
+/**
+ * O rótulo NÃO é mais `substring(id, 1, 8)` (issue #2342): a cascata gera um sufixo OPACO
+ * e o grava no contato no passo 1, e o gatilho de seções reusa este MESMO valor. O teste
+ * lê o que o banco guardou — a prova de que o sufixo não é mais o id está em
+ * `tests/invariants/lgpd-rotulo-opaco-e-external-id.test.ts`.
+ */
+function rotuloDe(contactId: string): string {
+  return sql(`select name from public.contacts where id = '${contactId}';`).trim().split("\n").at(-1) ?? "";
+}
 
 beforeAll(() => {
   sql(`
@@ -108,7 +114,7 @@ function anonimizar(contato: string): void {
 }
 
 describe("D8 — a anonimização alcança as seções de módulo declaradas", () => {
-  it("o mecanismo existe e nasce com o registro VAZIO (nenhum módulo declara ainda)", () => {
+  it("o mecanismo existe e o registro contém somente as seções declaradas de cadências", () => {
     expect(sql(`select (to_regclass('public.modulo_secoes_lgpd') is not null)::text;`)).toBe("true");
     expect(
       sql(`select count(*) from pg_proc where proname = 'fn_lgpd_redigir_secoes_de_modulo'
@@ -119,9 +125,12 @@ describe("D8 — a anonimização alcança as seções de módulo declaradas", (
              where c.relname = 'contacts' and t.tgname = 'trg_lgpd_secoes_de_modulo'
                and not t.tgisinternal;`),
     ).toBe("1");
-    // O registro nasce vazio de propósito — e é a prova de que a migration não inventou
-    // dado de LGPD para um módulo que não pediu (honorários, 0480).
-    expect(sql(`select count(*) from public.modulo_secoes_lgpd;`)).toBe("0");
+    // O catálogo é exato: novas declarações não passam sem revisão. Honorários mantém
+    // a ausência de seções que a migration 0480 decidiu; cadências declara as duas seções
+    // antes de provisionar tabelas, para o mesmo baseline servir módulo ausente e instalado.
+    expect(sql(`select coalesce(string_agg(modulo || '/' || tabela, '|' order by modulo, tabela), '')
+      from public.modulo_secoes_lgpd;`)).toBe("cadencias/email_cadence_enrollments|cadencias/email_cadence_events");
+    expect(sql(`select count(*) from public.modulo_secoes_lgpd where modulo = 'honorarios';`)).toBe("0");
     // E o guard é o da D8, lido do catálogo (não do arquivo): o corpo tem de resolver a
     // tabela com to_regclass antes de qualquer comando.
     expect(sql(`
@@ -168,7 +177,7 @@ describe("D8 — a anonimização alcança as seções de módulo declaradas", (
 
     anonimizar(ALVO);
 
-    expect(linhaDe(ALVO)).toBe(`<null>|${ROTULO_ESPERADO}`);
+    expect(linhaDe(ALVO)).toBe(`<null>|${rotuloDe(ALVO)}`);
     // O vizinho é da MESMA organização e da MESMA tabela — e não é tocado.
     expect(linhaDe(VIZINHO)).toBe("O nome de Joao Vizinho|querido Joao Vizinho");
   });
@@ -228,7 +237,7 @@ describe("D8 — a anonimização alcança as seções de módulo declaradas", (
     // A guarda `when (new.is_anonymized and not old.is_anonymized)` — repetir a chamada não
     // pode ser erro nem mudar o que já foi redigido.
     expect(() => anonimizar(ALVO)).not.toThrow();
-    expect(linhaDe(ALVO)).toBe(`<null>|${ROTULO_ESPERADO}`);
+    expect(linhaDe(ALVO)).toBe(`<null>|${rotuloDe(ALVO)}`);
     expect(linhaDe(VIZINHO)).toBe("O nome de Joao Vizinho|querido Joao Vizinho");
   });
 

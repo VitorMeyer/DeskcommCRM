@@ -27,7 +27,8 @@
  */
 import type pg from 'pg';
 
-import { canonicalWahaExternalId, parseWahaMessageId, wahaEchoExternalIds } from '@/lib/waha/message-id';
+import { canonicalWahaExternalId, chatIdFromWaMessageId, parseWahaMessageId, wahaEchoExternalIds } from '@/lib/waha/message-id';
+import { chatIndividualDaMensagem, chatSegueNaFicha } from '@/lib/waha/ultima-recebida';
 import { lerNumerosDeTeste, numeroPodeTestar, preGoLiveAtivo } from '@/lib/ai/elegibilidade/pre-go-live';
 import { canalDesativado } from '@/lib/channels/desativado';
 
@@ -97,7 +98,9 @@ export async function reconcileSessions(
   pool: pg.Pool,
   cfg: WatchdogConfig,
   log: Logger,
+  signal?: AbortSignal,
 ): Promise<number> {
+  if (signal?.aborted) return 0;
   const sessions = await fetchWahaSessions(cfg);
   if (sessions === null) {
     log.warn('watchdog: WAHA indisponível — tick de reconciliação pulado', {});
@@ -105,6 +108,7 @@ export async function reconcileSessions(
   }
   let fixed = 0;
   for (const s of sessions) {
+    if (signal?.aborted) break;
     const wahaStatus = (s.status ?? '').toUpperCase();
     // Arquivada não é nossa: a exclusão desloga o aparelho. Uma sessão STOPPED
     // órfã no transporte não pode voltar a receber mensagem num canal que a UI
@@ -119,6 +123,7 @@ export async function reconcileSessions(
        where cs.waha_session_name = $1 and to_jsonb(cs) ->> 'archived_at' is null`,
       [s.name],
     );
+    if (signal?.aborted) break;
     if (nossas.length === 0) continue;
 
     let nextStatus = wahaStatus;
@@ -133,6 +138,21 @@ export async function reconcileSessions(
       }
     }
 
+    // ZERO LINHAS PARA ESCREVER NÃO É UMA ESCRITA (#3695). O `where` abaixo já
+    // traz `status is distinct from $2`, então o banco devolvia 0 linhas — mas a
+    // INSTRUÇÃO era emitida assim mesmo a cada tick de ~30 s (274 vezes em 2h19
+    // medidas na issue), com parse, plano e varredura para não mudar nada. A
+    // leitura acima já responde a mesma pergunta: `nossas` é EXATAMENTE o
+    // conjunto que o `where` alcança (mesmo `waha_session_name`, mesmo
+    // `archived_at is null`). O `is distinct from` continua no `where` como
+    // trava de corrida: outra instância pode ter mudado a linha entre o select
+    // e o update.
+
+    if (nossas.every((nossa) => nossa.status === nextStatus)) continue;
+
+    // Sem guarda de parada aqui: o start acima pode já ter religado a sessão, e
+    // parar agora deixaria o transporte STARTING com o espelho ainda STOPPED.
+    // O desligamento espera este laço antes de fechar o pool.
     const { rows } = await pool.query<{ id: string; status: string }>(
       `update channel_sessions
           set status = $2, updated_at = now()
@@ -159,6 +179,8 @@ interface QueuedRow {
   organization_id: string;
   /** A limpeza do eco só procura na conversa da própria mensagem. */
   conversation_id: string;
+  /** Ficha da mensagem: a regra do telefone extra parte dela. */
+  contact_id: string | null;
   body: string | null;
   waha_session_name: string;
   wa_identity: string | null;
@@ -177,14 +199,63 @@ interface QueuedRow {
  * `wa_lid` na frente pelo motivo da 0122: `wa_identity` é GERADA com o telefone
  * antes do lid, então o contato @lid que ganhou número passa a bater na linha do
  * `phone:` e a conversa mudaria de canal no reenvio.
+ *
+ * `ultimoRecebido` é o chat da última mensagem recebida, só quando a ficha tem
+ * telefone extra (`ultimaRecebidaDaFicha`). Vem logo depois do grupo, como em
+ * `resolveWahaChatId`: sem isso o reenvio sairia pelo principal.
  */
-function chatIdOf(m: QueuedRow): string | null {
+function chatIdOf(m: QueuedRow, ultimoRecebido: string | null): string | null {
   if (m.is_group && m.group_chat_id) return m.group_chat_id;
+  if (ultimoRecebido) return ultimoRecebido;
   if (m.wa_lid) return `${m.wa_lid}@lid`;
   if (m.wa_identity?.startsWith('lid:')) return `${m.wa_identity.slice(4)}@lid`;
   if (m.wa_identity?.startsWith('phone:+')) return `${m.wa_identity.slice(7)}@c.us`;
   if (m.phone_number) return `${m.phone_number.replace('+', '')}@c.us`;
   return null;
+}
+
+/**
+ * O chat da última mensagem RECEBIDA da conversa, quando a ficha tem telefone
+ * extra. MESMA REGRA de `chatIdDaUltimaRecebida` (lib/waha/ultima-recebida.ts),
+ * em SQL, porque este processo tem só o `pg` cru. Ficha sem extra devolve null
+ * depois de UMA consulta barata e a regra de sempre segue.
+ *
+ * Qualquer erro vira null com `warn`: o reenvio não pode parar por isso.
+ */
+async function ultimaRecebidaDaFicha(
+  pool: pg.Pool,
+  m: QueuedRow,
+  log: Logger,
+): Promise<string | null> {
+  if (m.is_group || !m.contact_id) return null;
+  try {
+    const { rows: extras } = await pool.query<{ phone_number: string }>(
+      `select phone_number from contact_phones
+       where organization_id = $1 and contact_id = $2`,
+      [m.organization_id, m.contact_id],
+    );
+    if (extras.length === 0) return null;
+    const { rows: recebidas } = await pool.query<{ external_id: string | null }>(
+      `select external_id from messages
+       where organization_id = $1 and conversation_id = $2
+         and direction = 'inbound' and external_id is not null
+       order by created_at desc
+       limit 1`,
+      [m.organization_id, m.conversation_id],
+    );
+    const externalId = recebidas[0]?.external_id;
+    if (!externalId) return null;
+    const chat = chatIndividualDaMensagem(chatIdFromWaMessageId(externalId));
+    if (!chat) return null;
+    return chatSegueNaFicha(chat, [m.phone_number, ...extras.map((e) => e.phone_number)]) ? chat : null;
+  } catch (err) {
+    // Só a organização no log: o chat e o contato carregam telefone.
+    log.warn('watchdog: endereço da última recebida indisponível; segue pela regra de hoje', {
+      organization_id: m.organization_id,
+      error: (err instanceof Error ? err.message : String(err)).slice(0, 120),
+    });
+    return null;
+  }
 }
 
 /**
@@ -310,14 +381,23 @@ async function stampExternalIdAfterEcho(
   }
 }
 
-/** Reenvia mensagens AI presas em queued com sessão WORKING. */
+/**
+ * Reenvia mensagens AI presas em queued com sessão WORKING.
+ *
+ * `signal` é o do desligamento (#2823) e é OPCIONAL: sem ele o lote anda inteiro
+ * como andava antes. Com ele, o laço PARA ENTRE itens — nunca cancela um envio
+ * já iniciado. Um `fetch` em voo termina e grava o recibo (`markRedriveSent`);
+ * o que é recusado é abrir o PRÓXIMO item com o processo já de saída, que era o
+ * caminho para o lote inteiro segurar o shutdown.
+ */
 export async function redriveQueued(
   pool: pg.Pool,
   cfg: WatchdogConfig,
   log: Logger,
+  signal?: AbortSignal,
 ): Promise<number> {
   const { rows } = await pool.query<QueuedRow>(
-    `select m.id, m.organization_id, m.conversation_id, m.body, s.waha_session_name,
+    `select m.id, m.organization_id, m.conversation_id, m.contact_id, m.body, s.waha_session_name,
             c.wa_identity, c.wa_lid, c.phone_number, v.is_group, v.group_chat_id
      from messages m
      join channel_sessions s on s.id = m.channel_session_id and s.organization_id = m.organization_id
@@ -367,7 +447,12 @@ export async function redriveQueued(
 
   let sent = 0;
   for (const m of rows) {
-    const chatId = chatIdOf(m);
+    // PARA ENTRE itens (#2823): o shutdown não pode herdar o lote inteiro, mas
+    // também não se vira contra quem já saiu — quem está em voo termina e grava
+    // o recibo; só o próximo item é recusado, e a mensagem recusada continua
+    // `queued` para o tique do processo que subir depois.
+    if (signal?.aborted) break;
+    const chatId = chatIdOf(m, await ultimaRecebidaDaFicha(pool, m, log));
     if (chatId === null || m.body === null) {
       log.warn('watchdog: queued sem destino/corpo — pulada', { message_id: m.id });
       continue;
@@ -391,6 +476,12 @@ export async function redriveQueued(
          where m.id = $1 and m.organization_id = $2 and m.status = 'queued'`,
         [m.id, m.organization_id],
       );
+      // ABORT DURANTE a espera de elegibilidade (#2823): a releitura terminou e
+      // NADA foi enviado ainda, então parar aqui não larga envio no meio — é a
+      // mesma "para entre itens", no ponto em que o item ainda é barato de
+      // recusar. Sem esta linha o `fetch` de baixo rodava com o processo já de
+      // saída, e o lote continuaria até o fim.
+      if (signal?.aborted) break;
       const atual = acesso[0];
       if (!atual) continue;
       // Organização parada não fala: o resgate direto ao WAHA não pode ser a
@@ -482,8 +573,23 @@ export async function redriveQueued(
         });
       }
     }
-    // espaçamento anti-rajada entre reenvios
-    await new Promise((r) => setTimeout(r, cfg.redriveSpacingMs + Math.random() * cfg.redriveSpacingMs));
+    // Espaçamento anti-rajada entre reenvios. ABORTÁVEL (#2823): dormir o
+    // intervalo inteiro com o processo já de saída é o shutdown herdando o ritmo
+    // do anti-rajada. O ouvinte é REMOVIDO no fim de cada espera, como no laço do
+    // drain — sem isso cada item deixa um ouvinte morto no mesmo signal.
+    await new Promise<void>((resolve) => {
+      if (signal?.aborted) {
+        resolve();
+        return;
+      }
+      const finish = (): void => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, cfg.redriveSpacingMs + Math.random() * cfg.redriveSpacingMs);
+      signal?.addEventListener('abort', finish, { once: true });
+    });
   }
   return sent;
 }
@@ -497,8 +603,11 @@ export async function runSessionWatchdogLoop(
 ): Promise<void> {
   while (!signal.aborted) {
     try {
-      const fixed = await reconcileSessions(pool, cfg, log);
-      const redriven = await redriveQueued(pool, cfg, log);
+      const fixed = await reconcileSessions(pool, cfg, log, signal);
+      // (a) o abort pode ter chegado DURANTE o tick: sem esta linha o redrive
+      // abaixo abriria um lote NOVO com o processo já de saída.
+      if (signal.aborted) break;
+      const redriven = await redriveQueued(pool, cfg, log, signal);
       if (fixed + redriven > 0) {
         log.info('watchdog: tick com ação', { reconciled: fixed, redriven });
       }
@@ -507,12 +616,23 @@ export async function runSessionWatchdogLoop(
         error: (err instanceof Error ? err.message : String(err)).slice(0, 200),
       });
     }
+    // (a) DEPOIS de cada await e ANTES da espera (#2823): o `addEventListener`
+    // de um signal JÁ abortado nunca dispara (o `abort` aconteceu antes), então
+    // entrar aqui com o sinal dado faria o laço dormir os 60 s do tick — e o
+    // `shutdown` do worker espera este promise ANTES de começar o próprio prazo,
+    // herdando o atraso inteiro no `docker stop`.
+    if (signal.aborted) break;
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, cfg.intervalMs);
-      signal.addEventListener('abort', () => {
+      // O ouvinte é REMOVIDO no fim de cada espera, como no laço do drain: sem
+      // isso um worker de dias acumula um ouvinte morto por tick no mesmo
+      // AbortSignal — vazamento que não aparece como erro, só como memória.
+      const finish = (): void => {
         clearTimeout(timer);
+        signal.removeEventListener('abort', finish);
         resolve();
-      }, { once: true });
+      };
+      const timer = setTimeout(finish, cfg.intervalMs);
+      signal.addEventListener('abort', finish, { once: true });
     });
   }
 }

@@ -1,21 +1,25 @@
 import { requireSupportWrite } from "@/lib/impersonate/support";
 /**
  * GET    /api/v1/ai/routers/:id — detalhe do router + membros (agent+).
- * PATCH  /api/v1/ai/routers/:id — atualiza campos (admin), audit `ai.router_updated`.
+ * PATCH  /api/v1/ai/routers/:id — atualiza campos (admin), audit `ai.router_updated`;
+ *   com `channel_session_id`, move o roteador para o número novo (#4340), audit
+ *   `ai.router_channel_moved` (só sai de número removido — ver a régua no módulo).
  * DELETE /api/v1/ai/routers/:id — remove o router (admin), audit `ai.router_deleted`.
  *   Cascade FK (migration 0085) já apaga ai_router_members junto.
  *
- * organization_id sempre de requireRole — nunca do path/body.
+ * organization_id sempre da sessão/token — nunca do path/body.
  */
 import { randomUUID } from "node:crypto";
 import { type NextRequest } from "next/server";
 import { z } from "zod";
 
+import { resolveAuthDual, tetoDeEscritaDoToken } from "@/lib/api/auth-dual";
 import { ok, fail } from "@/lib/api/wrappers";
 import { audit } from "@/lib/audit";
-import { requireRole } from "@/lib/auth/require-role";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { traduzir } from "@/lib/i18n/dicionario";
+import { moverRoteadorParaNumero } from "@/lib/ai/agents/mover-roteador-de-numero";
+import { senderRoutesSchema } from "@/lib/ai/agents/sender-routes";
 import { MAX_CLASSIFIER_CONTEXT_MESSAGES } from "@/lib/ai/classifier-context";
 
 export const dynamic = "force-dynamic";
@@ -24,7 +28,8 @@ type RouteCtx = { params: Promise<{ id: string }> };
 
 const UUID_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const ROUTER_DETAIL_COLUMNS = "id, name, channel_session_id, is_active, config, fallback_agent_id";
+const ROUTER_DETAIL_COLUMNS =
+  "id, name, channel_session_id, is_active, config, fallback_agent_id, passagem_ao_cliente";
 const MEMBER_COLUMNS =
   "id, agent_id, intent_name, intent_description, examples, position, flow_pointer_id, pipeline_id, stage_id";
 
@@ -32,28 +37,55 @@ const patchRouterSchema = z.object({
   name: z.string().min(1).max(120).optional(),
   is_active: z.boolean().optional(),
   fallback_agent_id: z.string().uuid().nullable().optional(),
-  config: z.record(z.string(), z.unknown()).optional().refine((c) =>
-    c?.context_message_count === undefined ||
-    (typeof c.context_message_count === "number" && Number.isInteger(c.context_message_count) &&
-      c.context_message_count >= 0 && c.context_message_count <= MAX_CLASSIFIER_CONTEXT_MESSAGES),
-    "context_message_count deve ser inteiro entre 0 e 16"),
+  /**
+   * #4340 — mover o roteador INTEIRO (intenções, destinos, reserva) para o
+   * número novo. O corpo é o mesmo do formulário; a diferença é a régua em
+   * `moverRoteadorParaNumero`: só sai de número ARQUIVADO e só entra em número
+   * vivo e sem roteador, com auditoria "de X para Y".
+   */
+  channel_session_id: z.string().uuid().optional(),
+  /**
+   * #4363 — a frase que o CLIENTE lê quando o roteador troca de agente
+   * automaticamente. `null`/`""` = desligada (o padrão, e o comportamento de
+   * antes). Mesmo teto do CHECK da 9367: aqui a régua responde 422 com o motivo,
+   * em vez de deixar o banco recusar a linha inteira.
+   */
+  passagem_ao_cliente: z.string().max(1200).nullable().optional(),
+  config: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .refine(
+      (c) =>
+        c?.context_message_count === undefined ||
+        (typeof c.context_message_count === "number" &&
+          Number.isInteger(c.context_message_count) &&
+          c.context_message_count >= 0 &&
+          c.context_message_count <= MAX_CLASSIFIER_CONTEXT_MESSAGES),
+      "context_message_count deve ser inteiro entre 0 e 16",
+    ),
 });
 
 // ---------------------------------------------------------------------------
 // GET
 // ---------------------------------------------------------------------------
 
-export async function GET(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
+export async function GET(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   const requestId = randomUUID();
   const { id } = await ctx.params;
   if (!UUID_RX.test(id)) {
     return fail("invalid_request", "id inválido.", 400, { requestId });
   }
 
-  const authz = await requireRole("agent", { requestId, resource: "ai_routers" });
+  const authz = await resolveAuthDual(req, {
+    requestId,
+    resource: "ai_routers",
+    role: "agent",
+    scope: "config:read",
+    tokenRole: "admin",
+  });
   if (!authz.ok) return authz.response;
-  const t = (texto: string) => traduzir(texto, authz.user.idioma);
-  const { org } = authz;
+  const t = (texto: string) => traduzir(texto, authz.idioma ?? "pt-BR");
+  const { organizationId } = authz;
 
   const admin = createAdminClient();
 
@@ -61,7 +93,7 @@ export async function GET(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
     .from("ai_routers")
     .select(ROUTER_DETAIL_COLUMNS)
     .eq("id", id)
-    .eq("organization_id", org.orgId)
+    .eq("organization_id", organizationId)
     .maybeSingle();
   if (routerErr) {
     return fail("internal_error", "Erro ao buscar router.", 500, { requestId });
@@ -74,7 +106,7 @@ export async function GET(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
     .from("ai_router_members")
     .select(MEMBER_COLUMNS)
     .eq("router_id", id)
-    .eq("organization_id", org.orgId)
+    .eq("organization_id", organizationId)
     .order("position", { ascending: true });
   if (membersErr) {
     return fail("internal_error", "Erro ao buscar membros do router.", 500, { requestId });
@@ -97,10 +129,20 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
     return fail("invalid_request", "id inválido.", 400, { requestId });
   }
 
-  const authz = await requireRole("admin", { requestId, resource: "ai_routers" });
+  const authz = await resolveAuthDual(req, {
+    requestId,
+    resource: "ai_routers",
+    role: "admin",
+    scope: "config:write",
+    tokenRole: "admin",
+  });
   if (!authz.ok) return authz.response;
-  const t = (texto: string) => traduzir(texto, authz.user.idioma);
-  const { user: authUser, org } = authz;
+  const t = (texto: string) => traduzir(texto, authz.idioma ?? "pt-BR");
+  const { organizationId, actor } = authz;
+
+  const teto = await tetoDeEscritaDoToken(authz, "ai_routers", requestId);
+  if (teto) return teto;
+  const authUserId = actor.type === "user" ? actor.id : null;
 
   let rawBody: unknown;
   try {
@@ -120,11 +162,51 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
 
   const admin = createAdminClient();
 
+  // #4340 — a troca de número vem PRIMEIRO e tem régua própria. Ela não é um
+  // campo do formulário: é o gesto de resgatar um roteador cujo número foi
+  // removido. Se falhar, nada mais do patch é aplicado (o operador pediu uma
+  // coisa só e ela não aconteceu).
+  let mudancaDeNumero: { de: string; para: string; movido: boolean } | null = null;
+  if (patch.channel_session_id !== undefined) {
+    const resultado = await moverRoteadorParaNumero(admin, {
+      organizationId,
+      routerId: id,
+      novoChannelSessionId: patch.channel_session_id,
+      quemMoveu: { userId: authUserId, apiTokenId: authz.apiTokenId ?? null, requestId },
+    });
+    if (!resultado.ok) {
+      switch (resultado.code) {
+        case "router_not_found":
+          return fail("not_found", t("Router não encontrado."), 404, { requestId });
+        case "numero_atual_ainda_ativo":
+          return fail(
+            "numero_atual_ainda_ativo",
+            t("Este roteador ainda aponta para um número conectado."),
+            422,
+            { requestId },
+          );
+        case "numero_novo_invalido":
+          return fail("numero_novo_invalido", t("Escolha um número conectado desta empresa."), 422, {
+            requestId,
+          });
+        case "numero_novo_ja_tem_roteador":
+          return fail("router_already_exists", t("Este número já tem um roteador."), 409, {
+            requestId,
+          });
+        default:
+          return fail("internal_error", t("Erro ao mover o roteador de número."), 500, {
+            requestId,
+          });
+      }
+    }
+    mudancaDeNumero = resultado;
+  }
+
   const { data: existing, error: loadErr } = await admin
     .from("ai_routers")
-    .select("id, config")
+    .select("id, config, fallback_agent_id")
     .eq("id", id)
-    .eq("organization_id", org.orgId)
+    .eq("organization_id", organizationId)
     .maybeSingle();
   if (loadErr) {
     return fail("internal_error", "Erro ao carregar router.", 500, { requestId });
@@ -137,31 +219,82 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
   if (patch.name !== undefined) update.name = patch.name;
   if (patch.is_active !== undefined) update.is_active = patch.is_active;
   if (patch.fallback_agent_id !== undefined) update.fallback_agent_id = patch.fallback_agent_id;
+  if (patch.passagem_ao_cliente !== undefined) {
+    // `""` e espaço em branco são DESLIGADO, não uma mensagem vazia: a mesma
+    // régua do leitor (`normalizarPassagemAoCliente`), para que a tela possa
+    // "salvar vazio" sem gravar uma frase que ninguém escreveu.
+    const frase = patch.passagem_ao_cliente?.trim() ?? "";
+    update.passagem_ao_cliente = frase === "" ? null : frase;
+  }
   if (patch.config !== undefined) {
     const currentConfig = (existing.config ?? {}) as Record<string, unknown>;
     update.config = { ...currentConfig, ...patch.config };
   }
 
+  const mergedConfig = (update.config ?? existing.config ?? {}) as Record<string, unknown>;
+  if (mergedConfig.sender_routes !== undefined) {
+    const routes = senderRoutesSchema.safeParse(mergedConfig.sender_routes);
+    if (!routes.success)
+      return fail("validation_failed", "Regras por remetente inválidas.", 422, { requestId });
+    const fallback =
+      patch.fallback_agent_id !== undefined ? patch.fallback_agent_id : existing.fallback_agent_id;
+    if (routes.data.length && (!fallback || routes.data.some((r) => r.agent_id === fallback))) {
+      return fail(
+        "validation_failed",
+        "Escolha um fallback público diferente dos agentes reservados.",
+        422,
+        { requestId },
+      );
+    }
+    const ids = [
+      ...new Set([
+        ...routes.data.map((r) => r.agent_id),
+        ...(routes.data.length && fallback ? [fallback] : []),
+      ]),
+    ];
+    if (ids.length) {
+      const found = await admin
+        .from("ai_agents")
+        .select("id")
+        .eq("organization_id", organizationId)
+        .is("archived_at", null)
+        .in("id", ids);
+      if (found.error)
+        return fail("internal_error", "Erro ao validar agentes.", 500, { requestId });
+      if (found.data?.length !== ids.length)
+        return fail("validation_failed", "Agente não encontrado nesta organização.", 422, {
+          requestId,
+        });
+    }
+    if (update.config) update.config = { ...mergedConfig, sender_routes: routes.data };
+  }
+
   if (Object.keys(update).length === 0) {
-    return ok({ id }, { requestId });
+    // Só a troca de número veio no corpo: a linha já foi gravada (e auditada)
+    // por `moverRoteadorParaNumero`. Devolver os dois ids deixa o cliente
+    // conferir o movimento sem uma segunda leitura.
+    return ok({ id, ...(mudancaDeNumero ?? {}) }, { requestId });
   }
 
   const { error: updErr } = await admin
     .from("ai_routers")
     .update(update)
     .eq("id", id)
-    .eq("organization_id", org.orgId);
+    .eq("organization_id", organizationId);
   if (updErr) {
     if (updErr.code === "23505") {
-      return fail("router_already_exists", t("Este número já tem um roteador ativo."), 409, { requestId });
+      return fail("router_already_exists", t("Este número já tem um roteador ativo."), 409, {
+        requestId,
+      });
     }
     return fail("internal_error", "Erro ao atualizar router.", 500, { requestId });
   }
 
   void audit({
     action: "ai.router_updated",
-    actorUserId: authUser.id,
-    organizationId: org.orgId,
+    actorUserId: authUserId,
+    actorApiTokenId: authz.apiTokenId ?? null,
+    organizationId,
     resourceType: "ai_router",
     resourceId: id,
     requestId,
@@ -175,7 +308,7 @@ export async function PATCH(req: NextRequest, ctx: RouteCtx): Promise<Response> 
 // DELETE
 // ---------------------------------------------------------------------------
 
-export async function DELETE(_req: NextRequest, ctx: RouteCtx): Promise<Response> {
+export async function DELETE(req: NextRequest, ctx: RouteCtx): Promise<Response> {
   const supportDenied = await requireSupportWrite();
   if (supportDenied) return supportDenied;
 
@@ -185,10 +318,20 @@ export async function DELETE(_req: NextRequest, ctx: RouteCtx): Promise<Response
     return fail("invalid_request", "id inválido.", 400, { requestId });
   }
 
-  const authz = await requireRole("admin", { requestId, resource: "ai_routers" });
+  const authz = await resolveAuthDual(req, {
+    requestId,
+    resource: "ai_routers",
+    role: "admin",
+    scope: "config:write",
+    tokenRole: "admin",
+  });
   if (!authz.ok) return authz.response;
-  const t = (texto: string) => traduzir(texto, authz.user.idioma);
-  const { user: authUser, org } = authz;
+  const t = (texto: string) => traduzir(texto, authz.idioma ?? "pt-BR");
+  const { organizationId, actor } = authz;
+
+  const teto = await tetoDeEscritaDoToken(authz, "ai_routers", requestId);
+  if (teto) return teto;
+  const authUserId = actor.type === "user" ? actor.id : null;
 
   const admin = createAdminClient();
 
@@ -196,7 +339,7 @@ export async function DELETE(_req: NextRequest, ctx: RouteCtx): Promise<Response
     .from("ai_routers")
     .select("id")
     .eq("id", id)
-    .eq("organization_id", org.orgId)
+    .eq("organization_id", organizationId)
     .maybeSingle();
   if (loadErr) {
     return fail("internal_error", "Erro ao carregar router.", 500, { requestId });
@@ -209,15 +352,16 @@ export async function DELETE(_req: NextRequest, ctx: RouteCtx): Promise<Response
     .from("ai_routers")
     .delete()
     .eq("id", id)
-    .eq("organization_id", org.orgId);
+    .eq("organization_id", organizationId);
   if (delErr) {
     return fail("internal_error", "Erro ao remover router.", 500, { requestId });
   }
 
   void audit({
     action: "ai.router_deleted",
-    actorUserId: authUser.id,
-    organizationId: org.orgId,
+    actorUserId: authUserId,
+    actorApiTokenId: authz.apiTokenId ?? null,
+    organizationId,
     resourceType: "ai_router",
     resourceId: id,
     requestId,

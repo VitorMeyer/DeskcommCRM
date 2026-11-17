@@ -20,6 +20,15 @@
 > free tier) — simples e com backup gerenciado. Supabase self-hosted também
 > funciona, mas não é coberto por este guia.
 
+### A região do projeto Supabase
+
+Crie o projeto na região **mais próxima da VPS que roda o compose** — VPS no Brasil → `South America
+(São Paulo)`; nos EUA ou na Europa, a região do Supabase mais perto dela (`us-east-1`,
+`eu-central-1`). O app, o worker do agente e o WAHA consultam o banco a cada tela e a cada mensagem:
+banco e VPS em continentes diferentes somam dezenas de milissegundos por ida e volta, em toda
+operação. **A região não se troca depois de criado o projeto** — mudar exige criar outro projeto e
+migrar os dados.
+
 ## 1. Clonar e configurar
 
 ```bash
@@ -309,7 +318,9 @@ conta própria — num caminho HTTP seu, nunca como caminho de arquivo.
   testada, e **numa VPS com proxy reverso próprio o `up -d` precisa dos dois
   arquivos de compose** — omitir `-f docker-compose.traefik.yml` recria o
   contêiner sem as labels de roteamento e o domínio inteiro passa a responder
-  404, com o contêiner `healthy`.
+  404, com o contêiner `healthy`. Atrás de NAT (ou CGNAT, ou rede sem entrada),
+  declare `REVERSE_PROXY=cloudflared` no `.env` e use o Cloudflare Tunnel — ver
+  `docs/runbooks/deploy.md` §5.
 
 ## Solução de problemas
 

@@ -1,6 +1,7 @@
 import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
+import { ehVistoAzul } from "../support/waha-visto-azul";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
 import { test, expect, type Page, type TestInfo } from "./helpers/test";
@@ -205,9 +206,11 @@ async function book(page: Page, f: Fixture) {
 const meet = (page: Page) => page.locator('section[aria-label="Google Meet"]');
 async function detail(page: Page, id: string) {
   await page.goto(`/app/agenda?compromisso=${id}`);
+  // O painel abre em "Carregando…" e só depois traz o título. No primeiro caso da parte, os 5 s
+  // padrão não bastaram para essa primeira leitura.
   await expect(
     page.getByRole("dialog").getByRole("heading", { name: "Consulta Meet", exact: true }),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 20_000 });
   await expect(meet(page)).toBeVisible();
 }
 async function action(page: Page, label: string, kind: "retry" | "deliver") {
@@ -356,6 +359,10 @@ async function deliveryReceiver() {
   const target = new URL(process.env.WAHA_API_BASE_URL!);
   expect(["127.0.0.1", "localhost"]).toContain(target.hostname);
   const server = createServer(async (req, res) => {
+    if (ehVistoAzul(req.url)) {
+      res.end("{}");
+      return;
+    }
     let raw = "";
     for await (const chunk of req) raw += String(chunk);
     bodies.push(JSON.parse(raw));

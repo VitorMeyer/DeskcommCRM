@@ -21,12 +21,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useState } from "react";
 
 import { showApiError } from "@/components/feedback/ApiErrorToast";
+import { RankingsDeNegociosGanhos } from "@/components/relatorios/rankings-de-negocios-ganhos";
 import { useT } from "@/hooks/i18n/useT";
+import { diaDeHojeLocal } from "@/lib/ai/pacing-knobs";
 import { apiClient } from "@/lib/api/client";
 import { rotuloDoContato } from "@/lib/contacts/rotulo-do-contato";
 import { formatCents } from "@/lib/money";
 
 import { ListaDeLancamentos, type Conta, type Lancamento } from "./_lancamentos";
+import { rotuloDoMembro } from "@/lib/users/rotulo-do-atendente";
 
 type Forma = { nome: string; quantidade: number; total_cents: number };
 type Profissional = { attendant_user_id: string | null; itens: number; comissao_cents: number };
@@ -54,10 +57,17 @@ type Relatorio = Totais & {
   por_moeda?: Record<string, Totais>;
 };
 
-type Pessoa = { user_id: string; name: string | null; email: string | null };
+/** O formato de `/api/v1/team/assignable`: o nome vem em `full_name`. */
+type Pessoa = { user_id: string; full_name: string | null };
 
-const hoje = () => new Date().toISOString().slice(0, 10);
-const primeiroDoMes = () => `${hoje().slice(0, 7)}-01`;
+/**
+ * O período padrão do relatório no calendário de quem usa a tela (#2935).
+ * `toISOString()` dava o dia UTC: depois das 21h em Brasília o "até" pulava para
+ * amanhã e, no último dia do mês, o "dia 1º" saltava para o mês seguinte. O
+ * `primeiroDoMes` é derivado do MESMO `hoje` local, então os dois andam juntos.
+ */
+export const hoje = () => diaDeHojeLocal();
+export const primeiroDoMes = () => `${hoje().slice(0, 7)}-01`;
 
 /**
  * Um bloco por moeda, na ordem de `formatSomaPorMoeda` (lib/money.ts): a moeda
@@ -115,7 +125,7 @@ export function Faturamento({
   const nomeDe = (id: string | null) => {
     if (!id) return t("Sem responsável");
     const p = (equipe.data ?? []).find((x) => x.user_id === id);
-    return p?.name ?? p?.email ?? t("Sem responsável");
+    return p ? rotuloDoMembro(p, t) : t("Sem responsável");
   };
 
   // Os nomes dos clientes, pelo mesmo motivo dos da equipe: o relatório devolve
@@ -194,7 +204,7 @@ export function Faturamento({
             value={de}
             data-testid="periodo-de"
             onChange={(e) => setDe(e.target.value)}
-            className="rounded-md border border-border bg-surface-elevated p-2 text-sm text-text"
+            className="rounded-md border border-border bg-surface-elevated p-2 text-sm text-text max-md:min-h-11"
           />
         </label>
         <label className="flex flex-col gap-1 text-xs text-text-muted">
@@ -204,7 +214,7 @@ export function Faturamento({
             value={ate}
             data-testid="periodo-ate"
             onChange={(e) => setAte(e.target.value)}
-            className="rounded-md border border-border bg-surface-elevated p-2 text-sm text-text"
+            className="rounded-md border border-border bg-surface-elevated p-2 text-sm text-text max-md:min-h-11"
           />
         </label>
       </form>
@@ -243,9 +253,21 @@ export function Faturamento({
         );
       })}
 
+      {/*
+        Etiquetas que mais vendem e clientes que mais compram (#4280): o MESMO
+        período dos campos acima — o bloco não tem seletor próprio. Fica fora
+        dos blocos por moeda porque soma negócios ganhos na moeda da
+        organização, e não comandas; ele mesmo declara o que deixou de fora.
+      */}
+      <RankingsDeNegociosGanhos de={de} ate={ate} />
+
       <ListaDeLancamentos
         lancamentos={lancamentos.data ?? []}
         contas={contas.data ?? []}
+        // A moeda da organização é a régua do valor digitado (#3367) — mesma
+        // moeda que ordena os blocos acima. A `currency` gravada na linha ainda
+        // nasce no padrão do banco, BRL (ver #3379).
+        moeda={moedaDaOrg}
         podeLancar={podeLancar}
         onCriar={(corpo) => criar.mutate(corpo)}
         onPagar={(id) => pagar.mutate(id)}

@@ -9,6 +9,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { revogarAcessosDoContato } from "@/lib/mcp/servidor-externo/do-agente/revogacao";
+import { logger } from "@/lib/logger";
 import { observeServiceOrigin } from "@/lib/atendimento/origem";
 import { ApiError } from "@/lib/api/types";
 import type { Actor, HandlerCtx } from "@/lib/api/handlers/types";
@@ -16,11 +18,23 @@ import { audit } from "@/lib/audit";
 import { traduzir } from "@/lib/i18n/dicionario";
 import type { Idioma } from "@/lib/i18n/idiomas";
 import { roleAtLeast } from "@/lib/auth/types";
+import { ehRecusaSemInteresse } from "@/lib/lgpd/sem-interesse";
 import { canonicalPhoneBR, phoneLookupVariants } from "@/lib/channels/phone-variants";
 import { encontrarContatoPorTelefone } from "@/lib/channels/contato-por-telefone";
+import {
+  INDICE_CPF,
+  INDICE_EMAIL,
+  encontrarContatoPorCpfHash,
+  encontrarContatoPorEmail,
+  nomeDoIndiceUnico,
+} from "@/lib/contacts/conflito-unico";
 import { camposCpfParaGravar, hashCpf } from "@/lib/contacts/cpf";
 import type { Contact } from "@/lib/types/contacts";
-import { ensureConversation, sessaoProntaParaEnvio } from "@/lib/automation/start-conversation";
+import { abrirConversaDoContatoNovo, type PortaDaCriacao } from "@/lib/contacts/conversa-ao-criar";
+import { emitLeadActivity } from "@/lib/leads/activity-emitter";
+import { listaLegivel } from "@/lib/leads/activity-vocabulary";
+import { registraFalhaDeAtividade } from "@/lib/leads/activity-write-failure";
+import { atribuirConversaDoCadastroAoCriador } from "@/lib/contacts/conversa-do-criador";
 import type {
   ContactCreate,
   ContactPatch,
@@ -29,13 +43,58 @@ import type {
 } from "@/lib/schemas";
 import { contactListQuerySchema } from "@/lib/schemas";
 import { arrayDeUmValorParaOr } from "@/lib/inbox/marcador-da-conversa";
-import { buscaValeConsulta } from "@/lib/inbox/termo-de-busca";
-import { padraoRegexDeBusca } from "@/lib/contacts/busca-regex";
+import {
+  buscaValeConsulta,
+  normalizarTermoDeBusca,
+  termoSeguroParaOr,
+  termoSemAcento,
+} from "@/lib/inbox/termo-de-busca";
+import {
+  camposQueMudaram,
+  defsDoPadraoDaOrg,
+  erroDePadrao,
+  recusasDePadrao,
+} from "@/lib/leads/padrao-do-campo";
+import { testaComPrazo } from "@/lib/leads/padrao-do-campo-no-servidor";
 
 type SB = SupabaseClient;
 
 const SELECT_COLS =
-  "id, organization_id, name, display_name, email, email_normalized, phone_number, cpf_hash, birthdate, is_blocked, blocked_reason, is_personal, is_anonymized, anonymized_at, is_merged_into, merged_at, consent, tags, source, source_metadata, custom_fields, created_at, updated_at, last_activity_at, first_service_at";
+  "id, organization_id, name, display_name, address_book_name, zip_code, street, number, complement, district, city, state, email, email_normalized, phone_number, cpf_encrypted, birthdate, is_blocked, blocked_reason, is_personal, contact_type, ai_opt_out, is_anonymized, anonymized_at, is_merged_into, merged_at, consent, tags, source, source_metadata, custom_fields, created_at, updated_at, last_activity_at, first_service_at";
+
+/**
+ * A linha como o banco devolve. `cpf_encrypted` é interno a este módulo e só diz
+ * se há CPF: `contacts_cpf_consistency` obriga as duas colunas de CPF a serem
+ * nulas juntas, e a cifra só se abre em `decrypt_cpf`. Comparar por CPF é do
+ * servidor (`idsDeContatosPorCpf`, `erroDeConflitoUnico`).
+ */
+type LinhaDeContato = Omit<Contact, "cpf_available"> & { cpf_encrypted: unknown };
+
+/**
+ * A ficha que sai deste módulo: o sinal de que há CPF, nunca a coluna. Toda
+ * saída de `SELECT_COLS` passa aqui — os handlers servem à REST e ao MCP.
+ */
+function fichaDaResposta({ cpf_encrypted, ...ficha }: LinhaDeContato): Contact {
+  return { ...ficha, cpf_available: !!cpf_encrypted };
+}
+
+/**
+ * As fichas vivas desta organização com o CPF de `digits`. Sem `limit`: o índice
+ * único de CPF nasce com `if not exists`, e a ficha repetida num clone sem ele
+ * também tem de aparecer na busca.
+ */
+async function idsDeContatosPorCpf(ctx: HandlerCtx, digits: string): Promise<string[]> {
+  const { data, error } = await createAdminClient()
+    .from("contacts")
+    .select("id")
+    .eq("organization_id", ctx.organization_id)
+    .eq("cpf_hash", hashCpf(digits))
+    .is("is_merged_into", null);
+  if (error) {
+    throw new ApiError(500, "internal_error", undefined, ctx.requestId, error.message);
+  }
+  return ((data ?? []) as { id: string }[]).map((r) => r.id);
+}
 
 interface CursorPayload {
   sort: string | null;
@@ -55,6 +114,7 @@ function decodeCursor(raw: string): CursorPayload | null {
     if (typeof parsed.id !== "string") return null;
     // Cursores legados (só created_at) ou do formato anterior (last_activity_at).
     const sort = parsed.sort ?? parsed.last_activity_at ?? parsed.created_at ?? null;
+    if (sort !== null && typeof sort !== "string") return null;
     return { sort, id: parsed.id };
   } catch {
     return null;
@@ -63,13 +123,19 @@ function decodeCursor(raw: string): CursorPayload | null {
 
 function actorAuditPayload(actor: Actor): {
   actorUserId: string | null;
+  /** O token de integração por trás da ação, quando houver (`api_tokens.id`). */
+  actorApiTokenId: string | null;
   metadataActor: Record<string, unknown>;
 } {
   if (actor.type === "user") {
-    return { actorUserId: actor.id, metadataActor: { actor_type: "user" } };
+    return { actorUserId: actor.id, actorApiTokenId: null, metadataActor: { actor_type: "user" } };
   }
   return {
     actorUserId: null,
+    // Token de servidor sem escopo de agente (`api_token`): o `id` do ator É o
+    // id da linha do token. No agente de IA, o token vem em `api_token_id`.
+    actorApiTokenId:
+      actor.type === "api_token" ? actor.id : actor.type === "ai_agent" ? (actor.api_token_id ?? null) : null,
     metadataActor: {
       actor_type: actor.type,
       actor_id: actor.id,
@@ -162,65 +228,58 @@ export async function listContactsHandler(
     .limit(q.limit + 1);
 
   if (q.search && termoDeTexto !== undefined) {
-    // ─── O padrão sai em regex, não em LIKE (#1835, F2) ─────────────────────
-    // A composição continua a MESMA da busca de conversas
-    // (`conversations/_handler.ts:297`, `termoSeguroParaOr(normalizarTermoDeBusca(...))`)
-    // e continua sendo a régua única de `lib/inbox/termo-de-busca.ts` — o que
-    // muda é o DESTINO do padrão:
+    // ─── A MESMA RÉGUA DA BUSCA DO INBOX (#3918, fatia 2) ──────────────────
     //
-    //   normalizarTermoDeBusca → como a PESSOA digitou: espaço duplo, vírgula e
-    //                            ponto e vírgula colapsam num curinga só, então
-    //                            "Paulo  Lima" e "Paulo Jr" acham o "Paulo Lima Jr"
-    //                            e "Silva, Maria" não exige mais adjacência
-    //   padraoRegexDeBusca     → o curinga vira `.*`, o `%`/`_` digitado continua
-    //                            literal, e a LETRA com grafias vira classe
-    //                            (`jo[aáàâãä]o`) — é ela que faz "Joao" achar
-    //                            "João" e "João" achar "Joao"
+    // Aqui havia `name.imatch.*…*`, `display_name.imatch.*…*` e
+    // `address_book_name.imatch.*…*`. O `ILIKE` (e o regex que o imitava) dobra
+    // a CAIXA, não o ACENTO — `lower('Á') = 'á'`, que não é `'a'` —, então
+    // "Joao" não achava "João" e quem digita rápido, sem acento, concluía que o
+    // cliente não existia. Desde o #3924 o banco tem a coluna GERADA
+    // `contacts.busca_sem_acento` — `lower(public.f_unaccent(display_name,
+    // name, address_book_name))`, com índice `pg_trgm` (migration 9098) — e o
+    // inbox já busca nela. A partir daqui as TRÊS portas da busca de contato
+    // (a tela de Contatos, o seletor e a ferramenta do agente) usam a MESMA
+    // coluna, e `lib/contacts/busca-regex.ts` (a régua própria da #1835) foi
+    // aposentada: duas réguas de acento divergem no primeiro ajuste.
     //
-    // Por que regex e não `ilike` (a parte medida da F2): `ILIKE` dobra a CAIXA,
-    // não o ACENTO — `lower("Á") = "á"`, que não é `"a"` —, e o banco não tem
-    // `unaccent` nenhum (`git grep unaccent origin/main -- supabase/` = 0) para
-    // chamar do lado de lá. Sem coluna materializada (migração + backfill + gatilho,
-    // a F2 que ficou de fora do #1892), a comparação de acento é NOSSA dos dois
-    // lados: o termo normalizado aqui, a coluna virando classe no padrão. O
-    // operador `imatch` (`~*`) resolve a caixa. Medido contra o PostgREST real
-    // (docker postgrest/postgrest:latest + postgres:17) antes de escrever esta
-    // linha: um só `or=` com as quatro colunas em `imatch` + as variantes de
-    // telefone em `ilike` devolve as seis linhas certas.
+    // Composição, nesta ordem — cada passo tem um dono:
+    //   normalizarTermoDeBusca → como a PESSOA digitou (espaço duplo, vírgula
+    //                            e ponto e vírgula viram UM curinga)
+    //   termoSeguroParaOr      → a GRAMÁTICA do `or=` do PostgREST (`,` `(` `)`
+    //                            viram curinga; `%`/`_` digitados, literais)
+    //   termoSemAcento         → o lado do TERMO da coluna: NFD sem marca,
+    //                            minúsculo, com a mesma tabela de letras que o
+    //                            `unaccent` do banco cobre (ß→ss, ø→o…)
     //
-    // Os PARÊNTESES saem ANTES da régua: são delimitador do DSL do `.or()` do
-    // PostgREST (um "(" sem fechar derrubaria o filtro inteiro com HTTP 400 — no
-    // regex o Postgres devolve `2201B parentheses () not balanced`) e a régua não
-    // os conhece — tirá-los depois deixaria `Paulo* Jr` com espaço solto, que não
-    // casa nada. A VÍRGULA também não passa: `normalizarTermoDeBusca` usa ela
-    // como separador, e uma vírgula que sobrasse splitaria o `.or()` em duas
-    // condições (medido: `PGRST100 failed to parse logic tree`). Um nome com
-    // vírgula continua sem injetar condição nenhuma.
-    const s = padraoRegexDeBusca(termoDeTexto);
+    // `like` e não `ilike`: a coluna já é minúscula, e o índice GIN de trigrama
+    // serve os dois operadores. O `%`/`_` escapado pelo `termoSeguroParaOr` é
+    // literal no LIKE do Postgres — o `%` digitado não vira "casa tudo".
+    //
+    // Os PARÊNTESES saem ANTES da régua, como antes: são delimitador do DSL do
+    // `.or()` (um `(` sem fechar derrubaria o filtro inteiro com HTTP 400) e a
+    // régua não os conhece — tirá-los depois deixaria espaço solto, que não
+    // casa nada.
+    const s = termoSemAcento(termoSeguroParaOr(normalizarTermoDeBusca(termoDeTexto)));
+
+    // A coluna do NOME muda com `soContato`: `busca_sem_acento` carrega também
+    // o nome da agenda do celular (#2439), e ele é SÓ DA EQUIPE. Na busca do
+    // agente durante a conversa (`crm_search_contacts`), casar nele faria a
+    // ferramenta responder ao modelo se o rótulo interno contém o termo — o
+    // rótulo chegaria ao cliente aos pedaços. `busca_sem_acento_sem_agenda`
+    // (migration 9325) é `display_name` + `name` e nada mais, e é a coluna que
+    // aquela busca usa; ela não tem índice porque o `id` do turno já a reduz a
+    // UMA linha.
+    const colunaDoNome = soContato ? "busca_sem_acento_sem_agenda" : "busca_sem_acento";
+
     const digits = q.search.replace(/\D/g, "");
     const orParts = [
-      `name.imatch.${s}`,
-      // ⚠️ `display_name` ESTAVA DE FORA, e é a coluna que a tela MOSTRA.
-      //
-      // Contato que entra pelo WhatsApp nasce só com `display_name` (o pushName);
-      // `name` fica nulo até alguém editar à mão, e a busca ignorava exatamente
-      // o nome que o usuário vê e digita. Medido nesta instalação: 15 de 33
-      // contatos têm `display_name` e nenhum `name`.
-      //
-      // Quem decide o nome exibido é `nomeDoContato`/`rotuloDoContato`
-      // (lib/contacts/rotulo-do-contato.ts) — a ordem em vigor se lê ali, não
-      // aqui. Esta linha já afirmou que a UI prefere `display_name`, e a issue
-      // #906 inverteu a precedência sem que a frase acompanhasse. O que
-      // justifica a coluna no OR não é a ordem: é que ela é a ÚNICA preenchida
-      // em metade da base, então buscar sem ela devolve zero para quem existe.
-      //
-      // Achado por um turno de agente REAL (IA 360 · wave 2): pedido para marcar
-      // um retorno para "Cliente Retorno E2E", o modelo chamou esta busca, levou
-      // zero resultados para um contato que EXISTE, e desistiu — a demanda
-      // morreria por uma coluna faltando no OR.
-      `display_name.imatch.${s}`,
-      `email.imatch.${s}`,
-      `phone_number.imatch.${s}`,
+      `${colunaDoNome}.like.*${s}*`,
+      // Email e telefone NÃO têm acento: seguem no `ilike` com o termo
+      // saneado, e não na coluna gerada — ela guarda só os NOMES. Continuam no
+      // OR porque a pessoa busca o cadastro pelo que tem à mão: o e-mail que o
+      // cliente mandou ou o número do identificador de chamadas.
+      `email.ilike.*${s}*`,
+      `phone_number.ilike.*${s}*`,
     ];
     if (digits.length >= 8) {
       // 10/11 dígitos sem DDI: no Brasil é DDD+local. Sem o 55, `3284793302`
@@ -229,13 +288,39 @@ export async function listContactsHandler(
         !digits.startsWith("55") && (digits.length === 10 || digits.length === 11)
           ? `55${digits}`
           : digits;
+      // Os critérios de TELEFONE do principal, reaproveitados para o extra abaixo.
+      const criteriosDeTelefone = [`phone_number.ilike.*${s}*`];
       for (const v of phoneLookupVariants(base)) {
         const d = v.replace(/\D/g, "");
-        if (d && d !== digits) orParts.push(`phone_number.ilike.%${d}%`);
+        if (d && d !== digits) {
+          orParts.push(`phone_number.ilike.%${d}%`);
+          criteriosDeTelefone.push(`phone_number.ilike.%${d}%`);
+        }
+      }
+      // Ficha cujo TELEFONE EXTRA casa o termo também entra na busca: sem isto, o
+      // número que não é o principal não acharia a pessoa que o tem. A consulta
+      // aos extras é do mesmo jeito filtrada por organização; a ficha continua
+      // passando pelo filtro de lápide e de pessoal da listagem.
+      //
+      // Só quando o termo TEM CARA DE TELEFONE (dígitos e a pontuação de número):
+      // texto com letras e dígitos ("a,organization_id.eq.000…") não é busca de
+      // número, e uma consulta a mais por termo hostil é o que a cerca da busca
+      // (`busca-de-contatos-normaliza-termo`) conta.
+      if (/^[\d\s()+.-]+$/.test(q.search.trim())) {
+        const { data: extras } = await supabase
+          .from("contact_phones")
+          .select("contact_id")
+          .eq("organization_id", ctx.organization_id)
+          .or(criteriosDeTelefone.join(","));
+        const idsDeExtras = [
+          ...new Set(((extras ?? []) as { contact_id: string }[]).map((r) => r.contact_id)),
+        ];
+        if (idsDeExtras.length > 0) orParts.push(`id.in.(${idsDeExtras.join(",")})`);
       }
     }
     if (digits.length === 11) {
-      orParts.push(`cpf_hash.eq.${hashCpf(digits)}`);
+      const idsPorCpf = await idsDeContatosPorCpf(ctx, digits);
+      if (idsPorCpf.length > 0) orParts.push(`id.in.(${idsPorCpf.join(",")})`);
     }
     query = query.or(orParts.join(","));
   }
@@ -256,6 +341,9 @@ export async function listContactsHandler(
     query = query.contains("tags", q.tag);
   }
   if (q.source) query = query.eq("source", q.source);
+  // `yes` responde "quem pediu para não ser incomodado"; `no`, quem não pediu
+  // opt-out. Só o opt-out: exclusão de campanha e anonimizados não entram aqui.
+  if (q.blocked) query = query.eq("is_blocked", q.blocked === "yes");
   if (soContato) query = query.eq("id", soContato);
   // Pessoal fora da lista por padrão; `?pessoais=true` lista SÓ pessoais
   // (spec 21, etapa 13 — a tela do filtro e o desmarcar). Sem esta linha a
@@ -276,9 +364,12 @@ export async function listContactsHandler(
       );
     }
     const op = asc ? "gt" : "lt";
-    if (c.sort) {
+    if (c.sort !== null) {
+      // O NULL vem depois dos valores nos dois sentidos. O valor pode ser
+      // vazio ou conter pontuação da gramática do PostgREST.
+      const valor = `"${c.sort.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
       query = query.or(
-        `${sortCol}.${op}.${c.sort},and(${sortCol}.eq.${c.sort},id.${op}.${c.id})`,
+        `${sortCol}.${op}.${valor},and(${sortCol}.eq.${valor},id.${op}.${c.id}),${sortCol}.is.null`,
       );
     } else {
       // Página na região de sort NULL (nulls last): pagina só por id.
@@ -292,7 +383,7 @@ export async function listContactsHandler(
     throw new ApiError(500, "internal_error", undefined, ctx.requestId, error.message);
   }
 
-  const rows = (data ?? []) as Contact[];
+  const rows = ((data ?? []) as LinhaDeContato[]).map(fichaDaResposta);
   const hasMore = rows.length > q.limit;
   const page = hasMore ? rows.slice(0, q.limit) : rows;
   const last = page[page.length - 1];
@@ -368,7 +459,6 @@ export interface GetContactInput {
 }
 
 export interface GetContactResult extends Contact {
-  cpf_available: boolean;
   cpf_decrypted: string | null;
   cpf_decrypt_denied?: boolean;
 }
@@ -397,12 +487,12 @@ export async function getContactHandler(
       traduzir("Contato não encontrado.", ctx.idioma ?? "pt-BR"),
     );
   }
-  const contact = data as Contact;
+  const contact = fichaDaResposta(data as LinhaDeContato);
 
   let cpfDecrypted: string | null = null;
   let cpfDecryptDenied = false;
 
-  if (input.decryptPurpose && contact.cpf_hash && ctx.actor.type === "user") {
+  if (input.decryptPurpose && contact.cpf_available && ctx.actor.type === "user") {
     const { data: membership } = await supabase
       .from("user_organizations")
       .select("role")
@@ -440,9 +530,11 @@ export async function getContactHandler(
     }
   }
 
-  const { contacts: enriched, error: convErr } = await withConversas(supabase, ctx.organization_id, [
-    contact,
-  ]);
+  const { contacts: enriched, error: convErr } = await withConversas(
+    supabase,
+    ctx.organization_id,
+    [contact],
+  );
   if (convErr) {
     throw new ApiError(500, "internal_error", undefined, ctx.requestId, convErr);
   }
@@ -450,10 +542,103 @@ export async function getContactHandler(
 
   return {
     ...contactWithConversa,
-    cpf_available: !!contact.cpf_hash,
     cpf_decrypted: cpfDecrypted,
     cpf_decrypt_denied: cpfDecryptDenied || undefined,
   };
+}
+
+// ---------------------------------------------------------------------------
+// conflito de dado único (#3084)
+// ---------------------------------------------------------------------------
+
+/**
+ * Traduz um 23505 do INSERT/UPDATE de `contacts` no 409 `contact_exists` certo —
+ * ou devolve `null` para deixá-lo seguir no 500 de sempre.
+ *
+ * ─── O telefone continua decidindo pela RELEITURA, não pelo texto ──────────
+ *
+ * O 23505 sozinho nomeia UM índice; o estado (contato vivo com o mesmo telefone
+ * na mesma organização) já implica a trava de telefone de qualquer jeito. Por
+ * isso o caminho do telefone é o de antes — a releitura por `organization_id`
+ * decide, sem olhar o nome do índice. Mudar isso seria trocar um desenho que já
+ * estava certo.
+ *
+ * ─── CPF e e-mail precisam do NOME do índice ───────────────────────────────
+ *
+ * Aqui não há como inferir pelo estado: o erro diz qual índice bateu (o driver
+ * escreve o nome na `message`). Só o índice conhecido vira 409, e só depois de a
+ * releitura — sempre repetindo `organization_id` e `is_merged_into IS NULL` —
+ * achar o contato vivo que já tem o dado. Sem o contato, ou com o índice
+ * trocado, o 23505 continua no 500: não se inventa 409 sobre um conflito que
+ * não se sabe qual é.
+ *
+ * O `contact_id` devolvido vem SEMPRE da releitura, nunca do corpo.
+ */
+async function erroDeConflitoUnico(
+  supabase: SB,
+  ctx: HandlerCtx,
+  campos: { phone_number?: unknown; email?: unknown; cpf_hash?: unknown },
+  erro: { code?: string; message?: string; details?: string | null; constraint?: string | null },
+  excluirId?: string,
+): Promise<ApiError | null> {
+  if (erro.code !== "23505") return null;
+  const idioma = ctx.idioma ?? "pt-BR";
+
+  // 1) CPF e e-mail — só quando o erro NOMEIA o índice (#3084). Vem ANTES do
+  //    telefone: o PATCH da tela reenvia o telefone do PRÓPRIO contato, e a
+  //    releitura por telefone o acharia — 409 de telefone apontando para si mesmo.
+  const indice = nomeDoIndiceUnico(erro);
+  if (indice === INDICE_CPF) {
+    const hash = typeof campos.cpf_hash === "string" ? campos.cpf_hash : null;
+    if (hash) {
+      const existente = await encontrarContatoPorCpfHash(createAdminClient(), ctx.organization_id, hash);
+      if (existente) {
+        return new ApiError(
+          409,
+          "contact_exists",
+          { contact_id: existente.id },
+          ctx.requestId,
+          traduzir("Já existe um contato com este CPF.", idioma),
+        );
+      }
+    }
+  }
+  if (indice === INDICE_EMAIL) {
+    const email = typeof campos.email === "string" ? campos.email : null;
+    if (email) {
+      const existente = await encontrarContatoPorEmail(supabase, ctx.organization_id, email);
+      if (existente) {
+        return new ApiError(
+          409,
+          "contact_exists",
+          { contact_id: existente.id },
+          ctx.requestId,
+          traduzir("Já existe um contato com este e-mail.", idioma),
+        );
+      }
+    }
+  }
+
+  // 2) Telefone — o desenho de sempre (fatia S1 da #852): a releitura decide,
+  //    salvo quando o erro já nomeou CPF ou e-mail. No PATCH, `excluirId` é o
+  //    contato editado: achar a si mesmo pelo telefone não explica conflito
+  //    nenhum, e o 23505 segue no 500.
+  if (indice === INDICE_CPF || indice === INDICE_EMAIL) return null;
+  const telefone = typeof campos.phone_number === "string" ? campos.phone_number : null;
+  if (telefone) {
+    const existente = await encontrarContatoPorTelefone(supabase, ctx.organization_id, telefone);
+    if (existente && existente.id !== excluirId) {
+      return new ApiError(
+        409,
+        "contact_exists",
+        { contact_id: existente.id },
+        ctx.requestId,
+        traduzir("Já existe um contato com este telefone.", idioma),
+      );
+    }
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -465,20 +650,63 @@ export interface CreateContactResult {
   action: "created";
 }
 
+export interface CreateContactOptions {
+  /**
+   * Quem está criando, para a regra de "criar contato abre conversa"
+   * (`lib/contacts/conversa-ao-criar.ts`). Padrão `manual`: a rota e o cartão
+   * do negócio. A prospecção declara `prospeccao`, porque abre a conversa no
+   * canal da campanha por conta própria.
+   */
+  porta?: Extract<PortaDaCriacao, "manual" | "prospeccao">;
+}
+
 export async function createContactHandler(
   supabase: SB,
   ctx: HandlerCtx,
   input: ContactCreate,
+  linkedLeadId?: string,
+  opcoes: CreateContactOptions = {},
 ): Promise<CreateContactResult> {
+  // ── O PADRÃO (#2730) — a MESMA régua do formulário, aqui no SERVIDOR ──────
+  //
+  // O form é a primeira porta, não a garantia: dá para POSTar direto na API.
+  // As definições vêm de TODOS os funis da organização, porque o CONTATO não
+  // tem funil próprio — a tela lê o padrão (`useDefaultPipeline`) e o servidor,
+  // que não sabe qual é, pergunta a todos.
+  //
+  // Falha de leitura devolve lista vazia e a escrita segue: fail-open da casa
+  // (`settingsDoFunil` faz igual). Cair a rota por um `settings` torto seria
+  // trocar "grava torto" por "não grava nada" — e a régua só tem poder sobre
+  // o que ela consegue LER.
+  if (input.custom_fields && Object.keys(input.custom_fields).length > 0) {
+    // Escopo `contato` (#2852): a ficha do contato só recebe os campos do
+    // CONTATO, e são só esses que ela pode gravar. Sem o filtro, o padrão de um
+    // campo do NEGÓCIO — que o diálogo nem conhece — recusava a criação.
+    const defs = await defsDoPadraoDaOrg(supabase, ctx.organization_id, "contato");
+    const recusas = recusasDePadrao(defs, input.custom_fields, testaComPrazo);
+    if (recusas.length > 0) throw erroDePadrao(recusas, ctx.requestId, ctx.idioma);
+  }
+
   const a = actorAuditPayload(ctx.actor);
   const insertRow: Record<string, unknown> = {
     organization_id: ctx.organization_id,
     created_by_user_id: ctx.actor.type === "user" ? ctx.actor.id : null,
     name: input.name ?? null,
     display_name: input.display_name ?? null,
+    zip_code: input.zip_code ?? null,
+    street: input.street ?? null,
+    number: input.number ?? null,
+    complement: input.complement ?? null,
+    district: input.district ?? null,
+    city: input.city ?? null,
+    state: input.state ?? null,
     email: input.email ?? null,
     phone_number: input.phone_number ? canonicalPhoneBR(input.phone_number) : null,
     birthdate: input.birthdate ?? null,
+    // Só quando INFORMADO: sem a chave, quem grava o default é o banco
+    // ('cliente', migration 0763) — e é isso que o invariante de coluna prova
+    // ("contato novo nasce cliente sem ninguém informar").
+    ...(input.contact_type !== undefined ? { contact_type: input.contact_type } : {}),
     tags: input.tags ?? [],
     source: input.source,
     source_metadata: input.source_metadata ?? {},
@@ -493,50 +721,79 @@ export async function createContactHandler(
     Object.assign(insertRow, await camposCpfParaGravar(supabase, input.cpf));
   }
 
-  const { data: created, error: insErr } = await supabase
-    .from("contacts")
-    .insert(insertRow)
-    .select(SELECT_COLS)
-    .single();
+  const { data: created, error: insErr } = linkedLeadId
+    ? await supabase.rpc("fn_create_contact_for_lead", {
+        p_organization_id: ctx.organization_id,
+        p_lead_id: linkedLeadId,
+        p_contact: insertRow,
+      })
+    : await supabase.from("contacts").insert(insertRow).select(SELECT_COLS).single();
 
   if (insErr) {
-    // 409 quando o telefone já é de um contato vivo desta organização: o índice
-    // parcial `uniq_contacts_org_phone` (organization_id, phone_number) barra o
-    // insert com 23505. E-mail e CPF também têm trava única na tabela, então o
-    // 23505 sozinho não diz qual índice bateu: só vira `contact_exists` se a
-    // releitura do telefone achar um contato vivo. A releitura repete o filtro
-    // por `organization_id` — o id devolvido no `details` nunca vem do corpo da
-    // requisição — e qualquer outro conflito continua no 500 de sempre.
-    const telefoneDoInsert = insertRow.phone_number as string | null;
-    if (insErr.code === "23505" && telefoneDoInsert) {
-      const existente = await encontrarContatoPorTelefone(
-        supabase,
-        ctx.organization_id,
-        telefoneDoInsert,
+    if (insErr.code === "PT404") throw new ApiError(404, "not_found", undefined, ctx.requestId);
+    if (insErr.code === "PT409")
+      throw new ApiError(
+        409,
+        "conflict",
+        undefined,
+        ctx.requestId,
+        traduzir("Este negócio já tem contato vinculado. Atualize a ficha.", ctx.idioma ?? "pt-BR"),
       );
-      if (existente) {
-        throw new ApiError(
-          409,
-          "contact_exists",
-          { contact_id: existente.id },
-          ctx.requestId,
-          traduzir("Já existe um contato com este telefone.", ctx.idioma ?? "pt-BR"),
-        );
-      }
-    }
+    if (insErr.code === "42501") throw new ApiError(403, "forbidden", undefined, ctx.requestId);
+    // 409 quando o dado já pertence a um contato vivo desta organização (#3084).
+    //
+    // O índice parcial `uniq_contacts_org_phone` (organization_id, phone_number)
+    // barra o telefone repetido com 23505; o CPF (`uniq_contacts_org_cpf`) e o
+    // e-mail (`uniq_contacts_org_email`) têm a mesma trava. O telefone decide
+    // pela RELEITURA (não pelo texto do erro); CPF e e-mail usam o nome do
+    // índice que o driver nomeia. A releitura repete o filtro por
+    // `organization_id` — o id devolvido no `details` nunca vem do corpo da
+    // requisição — e qualquer outro conflito continua no 500 de sempre.
+    const conflito = await erroDeConflitoUnico(supabase, ctx, insertRow, insErr);
+    if (conflito) throw conflito;
     throw new ApiError(500, "internal_error", undefined, ctx.requestId, insErr.message);
   }
 
-  const contact = created as Contact;
-  if (contact.phone_number) {
-    try {
-      const sessionId = await sessaoProntaParaEnvio(supabase, ctx.organization_id);
-      if (sessionId) {
-        await ensureConversation(supabase, ctx.organization_id, contact.id, sessionId);
-      }
-    } catch {
-      // conversa no create é best-effort; o contato já existe
-    }
+  // A função do negócio já devolve a ficha, com `cpf_available` e sem coluna de CPF.
+  const contact = linkedLeadId ? (created as Contact) : fichaDaResposta(created as LinhaDeContato);
+  // ── A CONVERSA DO CONTATO NOVO (#3718) ────────────────────────────────────
+  //
+  // A regra — esta porta abre, a importação por CSV não — mora num lugar só:
+  // `lib/contacts/conversa-ao-criar.ts`. Aqui só se diz QUAL porta está
+  // criando. A chamada é best-effort e não lança: o contato já está gravado, e
+  // uma sessão torta não pode derrubar o cadastro. O que ela NÃO faz mais é
+  // falhar calada — o erro sai em `logger.warn` lá dentro, com org, contato e
+  // porta.
+  // Criar pelo negócio é a MESMA ficha manual, uma por vez: a regra de abrir
+  // conversa é a da porta `manual` (`lib/contacts/conversa-ao-criar.ts`), e o
+  // `contact.created` sai igual ao das outras portas que criam contato.
+  //
+  // Cliente de SERVIÇO, não o recebido: `fn_service_begin` só é concedido a
+  // `service_role`, e com o cliente do cookie a RPC voltava 42501 — o contato
+  // gravava e a conversa nunca abria. A organização já veio de fonte confiável
+  // (sessão ou token) em `ctx`, e a escolha da sessão e a RPC filtram por ela.
+  const conversa = await abrirConversaDoContatoNovo(createAdminClient(), {
+    porta: opcoes.porta ?? "manual",
+    organizationId: ctx.organization_id,
+    contactId: contact.id,
+    phoneNumber: contact.phone_number,
+    requestId: ctx.requestId,
+  });
+
+  // ── QUEM CRIOU O CONTATO ATENDE O CONTATO (#3479) ─────────────────────────
+  //
+  // No "Só os seus" a conversa sem dono é invisível ao Atendente (0035), e a
+  // que o cadastro acabou de abrir nascia de ninguém. Aqui ela nasce dele —
+  // pelo MESMO claim do botão Assumir, com CAS de "só se estiver livre". A
+  // decisão e o efeito moram em `lib/contacts/conversa-do-criador.ts`; esta
+  // chamada é best-effort e não lança (o contato já está gravado).
+  if (conversa.aberta) {
+    await atribuirConversaDoCadastroAoCriador(supabase, {
+      organizationId: ctx.organization_id,
+      conversationId: conversa.conversationId,
+      actor: ctx.actor,
+      requestId: ctx.requestId,
+    });
   }
 
   await supabase
@@ -548,7 +805,7 @@ export async function createContactHandler(
         source: contact.source,
         has_email: !!contact.email,
         has_phone: !!contact.phone_number,
-        has_cpf: !!contact.cpf_hash,
+        has_cpf: contact.cpf_available,
       },
       p_metadata: { request_id: ctx.requestId, ...a.metadataActor },
       p_organization_id: contact.organization_id,
@@ -567,6 +824,40 @@ export async function createContactHandler(
     metadata: { ...a.metadataActor, source: contact.source },
   });
 
+  if (linkedLeadId) {
+    // O vínculo entra na timeline do negócio como o PATCH de `contact_id` já
+    // faz (`leads/_handler.updateLeadHandler`): nome do campo, nunca o valor.
+    const atividade = await emitLeadActivity(supabase, {
+      organizationId: ctx.organization_id,
+      leadId: linkedLeadId,
+      contactId: contact.id,
+      type: "lead_edited",
+      sourceModule: "crm",
+      sourceId: linkedLeadId,
+      actor: ctx.actor,
+      reason: `Alterou ${listaLegivel(["contact_id"])}`,
+      payload: { fields: ["contact_id"] },
+    });
+    if (!atividade.ok) {
+      await registraFalhaDeAtividade(supabase, {
+        organizationId: ctx.organization_id,
+        leadId: linkedLeadId,
+        tipo: "lead_edited",
+        origem: "contacts/_handler.createContactHandler",
+        erro: atividade.error,
+        requestId: ctx.requestId,
+      });
+    }
+    await audit({
+      action: "lead.updated",
+      actorUserId: a.actorUserId,
+      organizationId: ctx.organization_id,
+      resourceType: "lead",
+      resourceId: linkedLeadId,
+      requestId: ctx.requestId,
+      metadata: { ...a.metadataActor, from: { contact_id: null }, to: { contact_id: contact.id } },
+    });
+  }
   return { contact, action: "created" };
 }
 
@@ -578,7 +869,9 @@ export async function patchContactHandler(
   supabase: SB,
   ctx: HandlerCtx,
   contactId: string,
-  input: ContactPatch,
+  // `null` em `phone_number` é o pedido de apagar o principal (Spec 31, B2);
+  // o schema da rota é o único que o deixa passar (`contactPatchSchemaDoPais`).
+  input: Omit<ContactPatch, "phone_number"> & { phone_number?: string | null },
 ): Promise<Contact> {
   const { data: existing, error: selErr } = await supabase
     .from("contacts")
@@ -618,9 +911,41 @@ export async function patchContactHandler(
     );
   }
 
+  // ── O PADRÃO (#2730) — DEPOIS do select, e só sobre o que MUDOU ──────────
+  //
+  // A MESMA régua da criação, com a MESMA leitura (todos os funis, escopo
+  // `contato`: o contato não tem funil próprio), mas agora JULGANDO O DIFF.
+  //
+  // Antes isto rodava no começo e julgava o `custom_fields` INTEIRO, na
+  // suposição de que "PATCH manda só o que mudou" — suposição falsa para este
+  // mapa: o `EditContactDialog` grava o objeto completo (o PATCH SUBSTITUI),
+  // e a edição pela lista de contatos manda o mapa que nem renderizou. Efeito
+  // medido no #2814: a pessoa troca só o nome e recebe 422 por um campo
+  // escondido (`mostrar_quando`) — ou por um campo de outro funil — que ela
+  // nem tocou. O estado anterior está aqui do lado (`existing.custom_fields`),
+  // então o que se julga é o valor que vai ser DIFERENTE do gravado.
+  if (input.custom_fields && Object.keys(input.custom_fields).length > 0) {
+    const alterados = camposQueMudaram(
+      input.custom_fields,
+      (existing as { custom_fields?: unknown }).custom_fields,
+    );
+    if (Object.keys(alterados).length > 0) {
+      const defs = await defsDoPadraoDaOrg(supabase, ctx.organization_id, "contato");
+      const recusas = recusasDePadrao(defs, alterados, testaComPrazo);
+      if (recusas.length > 0) throw erroDePadrao(recusas, ctx.requestId, ctx.idioma);
+    }
+  }
+
   const patch: Record<string, unknown> = {};
   if (input.name !== undefined) patch.name = input.name;
   if (input.display_name !== undefined) patch.display_name = input.display_name;
+  if (input.zip_code !== undefined) patch.zip_code = input.zip_code;
+  if (input.street !== undefined) patch.street = input.street;
+  if (input.number !== undefined) patch.number = input.number;
+  if (input.complement !== undefined) patch.complement = input.complement;
+  if (input.district !== undefined) patch.district = input.district;
+  if (input.city !== undefined) patch.city = input.city;
+  if (input.state !== undefined) patch.state = input.state;
   // `email_normalized` NÃO entra no patch — é `GENERATED ALWAYS AS
   // (lower(trim(email))) STORED` (baseline.sql:1349), e o Postgres RECUSA
   // qualquer atribuição a coluna gerada (SQLSTATE 428C9), abortando o UPDATE
@@ -630,9 +955,19 @@ export async function patchContactHandler(
   // O banco deriva a coluna sozinho — era só não escrever nela.
   if (input.email !== undefined) patch.email = input.email;
   if (input.phone_number !== undefined) {
-    patch.phone_number = input.phone_number ? canonicalPhoneBR(input.phone_number) : input.phone_number;
+    patch.phone_number = input.phone_number
+      ? canonicalPhoneBR(input.phone_number)
+      : input.phone_number;
   }
+  // Tipo e WhatsApp do principal (Spec 31, B2). Ausentes não entram no patch: o
+  // gatilho do banco recalcula só o que a pessoa não fixou (ver a migration 9043).
+  if (input.phone_type !== undefined) patch.phone_type = input.phone_type;
+  if (input.phone_whatsapp !== undefined) patch.phone_whatsapp = input.phone_whatsapp;
   if (input.birthdate !== undefined) patch.birthdate = input.birthdate;
+  // O TIPO DO CONTATO (issue 3005): o PATCH troca cliente ↔ fornecedor. Ausente
+  // NÃO entra no patch — quem não fala de tipo não reescreve a coluna, e é por
+  // isso que o schema não tem default aqui (o default 'cliente' é do BANCO).
+  if (input.contact_type !== undefined) patch.contact_type = input.contact_type;
   if (input.tags !== undefined) patch.tags = input.tags;
   if (input.source !== undefined) patch.source = input.source;
   if (input.source_metadata !== undefined) patch.source_metadata = input.source_metadata;
@@ -656,6 +991,27 @@ export async function patchContactHandler(
       string,
       unknown
     >;
+    // A recusa "sem interesse" (decisão D3) só se desfaz pela porta dela: o DELETE de
+    // `/api/v1/contacts/[id]/sem-interesse`, que exige administrador e audita
+    // `recusa_desfeita`. Sem esta trava, o PATCH (papel `agent`) trocava `marketing` por
+    // cima e devolvia o contato à prospecção e às Campanhas sem rastro. Reenviar a
+    // MESMA recusa (o editor que manda o objeto que leu) passa.
+    if (
+      "marketing" in input.consent &&
+      ehRecusaSemInteresse(anterior) &&
+      JSON.stringify(input.consent.marketing) !== JSON.stringify(anterior.marketing)
+    ) {
+      throw new ApiError(
+        409,
+        "state_conflict",
+        { campo: "consent.marketing" },
+        ctx.requestId,
+        traduzir(
+          "Este contato disse que não tem interesse. Só um administrador desfaz essa recusa, na aba LGPD da ficha do contato.",
+          ctx.idioma ?? "pt-BR",
+        ),
+      );
+    }
     patch.consent = { ...anterior, ...input.consent };
   }
   if (input.cpf !== undefined) {
@@ -676,6 +1032,30 @@ export async function patchContactHandler(
     );
   }
 
+  // Apagar o principal com telefone extra deixaria os extras sem número de
+  // resposta ("Tornar principal" é o caminho). Recusa ANTES do UPDATE: nada é
+  // gravado (Spec 31, B2, item 6). Leitura pela sessão, com o filtro de organização.
+  if (input.phone_number === null && (existing as { phone_number?: string | null }).phone_number) {
+    const { data: extras, error: errExtras } = await supabase
+      .from("contact_phones")
+      .select("id")
+      .eq("organization_id", ctx.organization_id)
+      .eq("contact_id", contactId)
+      .limit(1);
+    if (errExtras) {
+      throw new ApiError(500, "internal_error", undefined, ctx.requestId, errExtras.message);
+    }
+    if (extras && extras.length > 0) {
+      throw new ApiError(
+        409,
+        "primary_phone_has_extras",
+        undefined,
+        ctx.requestId,
+        traduzir("Torne outro número principal antes de remover este.", ctx.idioma ?? "pt-BR"),
+      );
+    }
+  }
+
   const tagServiceOrigin = input.tags !== undefined
     ? await observeServiceOrigin(createAdminClient(), ctx.organization_id, contactId)
     : null;
@@ -690,6 +1070,12 @@ export async function patchContactHandler(
     .maybeSingle();
 
   if (updErr) {
+    // #3084: o PATCH grava pela MESMA tabela e cai nas MESMAS travas únicas —
+    // `uniq_contacts_org_email` é o caso medido na issue (trocar o e-mail por um
+    // que já é de outro contato). O 409 sai com o `contact_id` de quem já tem o
+    // dado; qualquer outro conflito segue no 500 de sempre.
+    const conflito = await erroDeConflitoUnico(supabase, ctx, patch, updErr, contactId);
+    if (conflito) throw conflito;
     throw new ApiError(500, "internal_error", undefined, ctx.requestId, updErr.message);
   }
   if (!updated) {
@@ -702,7 +1088,7 @@ export async function patchContactHandler(
     );
   }
 
-  const contact = updated as Contact;
+  const contact = fichaDaResposta(updated as LinhaDeContato);
   const a = actorAuditPayload(ctx.actor);
   const fields = Object.keys(patch).filter((k) => k !== "updated_at");
 
@@ -763,9 +1149,47 @@ export async function patchContactHandler(
     }
   }
 
+  /**
+   * #2812 (segunda metade) — O CONTATO GANHOU TELEFONE.
+   *
+   * O gatilho `contact.phone_added` é a transição que faltava no vocabulário de
+   * automação: a ficha que estava SEM número passa a ter um. Emitido AQUI, e só
+   * aqui, por dois motivos que são a metade do trabalho:
+   *
+   *  - DEPOIS do UPDATE acima — a regra que este evento dispara lê a ficha para
+   *    decidir, e a guarda `checarGuardasDeContato` (lib/automation/guarda-do-contato.ts)
+   *    mata com `no_phone` (sem nova tentativa) quem chega sem número. Emitir
+   *    antes da gravação entregaria à regra um contato ainda vazio, e o defeito
+   *    é MUDO: a regra some sem erro, sem log e sem run.
+   *  - SÓ na TRANSIÇÃO (antes vazio/nulo, depois preenchido) — quem já tinha
+   *    número não "ganhou" nenhum, e tirar o número não é ganhá-lo. Um evento a
+   *    cada edição de ficha encheria a fila de automação com o que não aconteceu.
+   *
+   * A grafia do par é a MESMA de `contact.tag_added`, logo acima — e o `contact.phone_added`
+   * está irmão dele no mapa de gatilhos (lib/schemas/webhooks.ts).
+   */
+  const telefoneAntes = ((antes as { phone_number?: string | null }).phone_number ?? "").trim();
+  const telefoneDepois = ((contact as { phone_number?: string | null }).phone_number ?? "").trim();
+  if (!telefoneAntes && telefoneDepois) {
+    await createAdminClient()
+      .rpc("emit_event", {
+        p_event_type: "contact.phone_added",
+        p_entity_kind: "contact",
+        p_entity_id: contact.id,
+        p_payload: { phone_number: telefoneDepois },
+        p_metadata: { request_id: ctx.requestId, ...a.metadataActor },
+        p_organization_id: contact.organization_id,
+      })
+      .then(({ error }) => {
+        if (error) console.error("[contacts.patch] emit_event failed", error.message);
+      });
+  }
+
   await audit({
     action: "contact.updated",
     actorUserId: a.actorUserId,
+    // Só quando há token: a sessão segue com o objeto de sempre.
+    ...(a.actorApiTokenId ? { actorApiTokenId: a.actorApiTokenId } : {}),
     organizationId: contact.organization_id,
     resourceType: "contact",
     resourceId: contact.id,
@@ -830,11 +1254,7 @@ const VINCULOS_RESTRICT_NAO_APAGADOS: ReadonlyArray<{ tabela: string; rotulo: st
  * por organização, um id alheio responderia "sem vínculos" e a tela diria que é
  * seguro excluir algo que quem chamou nem enxerga.
  */
-async function contatoExistente(
-  supabase: SB,
-  ctx: HandlerCtx,
-  contactId: string,
-): Promise<void> {
+async function contatoExistente(supabase: SB, ctx: HandlerCtx, contactId: string): Promise<void> {
   const { data: existing, error: selErr } = await supabase
     .from("contacts")
     .select("id, organization_id")
@@ -942,7 +1362,10 @@ export async function deleteContactHandler(
       "state_conflict",
       { vinculos, por_tabela },
       ctx.requestId,
-      traduzir("Não foi possível excluir: o contato ainda tem registros vinculados.", ctx.idioma ?? "pt-BR"),
+      traduzir(
+        "Não foi possível excluir: o contato ainda tem registros vinculados.",
+        ctx.idioma ?? "pt-BR",
+      ),
     );
   }
 
@@ -959,6 +1382,20 @@ export async function deleteContactHandler(
   // tudo, ou não sai nada. É `security invoker` — a RLS de quem chama continua
   // valendo, e o filtro de `organization_id` é do banco (argumento + where), não
   // do chamador. Nenhum service role entra aqui.
+  //
+  // A exceção, antes da transação: os acessos OAuth do contato a servidores
+  // MCP externos (9095). A cascata apaga o token, e sem ele não há revogação no
+  // terceiro (RFC 7009) — então revoga primeiro. A tabela é server-side only
+  // (service role), filtrada pela organização do ctx. Melhor esforço: falha
+  // do terceiro não barra a exclusão.
+  await revogarAcessosDoContato(createAdminClient(), ctx.organization_id, contactId).catch(
+    (err: unknown) => {
+      logger.warn("revogacao dos acessos MCP do contato falhou antes da exclusao", {
+        organization_id: ctx.organization_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    },
+  );
   let apagou = false;
   try {
     const { data, error: rpcErr } = await supabase.rpc("fn_apagar_contato_com_historico", {

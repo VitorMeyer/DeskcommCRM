@@ -13,6 +13,7 @@ import { NextRequest } from "next/server";
 
 import { audit } from "@/lib/audit";
 import { requireRole } from "@/lib/auth/require-role";
+import type * as Canais from "@/lib/channels";
 import { sincronizarEstadoDaSessaoPareada } from "@/lib/channels/estado-da-sessao-pareada";
 import { CredencialRecusadaError } from "@/lib/channels/credencial-recusada";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -28,7 +29,7 @@ vi.mock("@/lib/channels/estado-da-sessao-pareada", () => ({
 
 const sessao = { connect: vi.fn(), getStatus: vi.fn(), disconnect: vi.fn() };
 vi.mock("@/lib/channels", async (importOriginal) => {
-  const real = (await importOriginal()) as typeof import("@/lib/channels");
+  const real = await importOriginal<typeof Canais>();
   return { ...real, getAdapter: () => ({ sessao }) };
 });
 

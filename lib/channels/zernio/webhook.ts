@@ -80,7 +80,12 @@ export interface ZernioInboundMessage {
   /** Conta conectada que recebeu — casa com `channel_sessions.zernio_account_id`. */
   accountId: string | null;
   text: string | null;
-  attachments: { type: string; url: string }[];
+  /**
+   * `filename`: o nome ORIGINAL do arquivo, quando o canal o entrega (documento).
+   * Vira `metadata.media_filename`, a chave que o cartão do Inbox e o download
+   * leem (#2613) — sem ela o documento aparece sem nome.
+   */
+  attachments: { type: string; url: string; filename?: string | null }[];
   sentAt: string | null;
   identity: ZernioIdentity;
   /**

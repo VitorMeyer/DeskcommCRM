@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -133,7 +134,8 @@ vi.mock("@/lib/channels/zernio/credentials", async (orig) => ({
 }));
 
 import { resolveZernioCreds } from "@/lib/channels/zernio/credentials";
-import { ingestZernioInbound, waIdentityFrom } from "@/lib/channels/zernio/ingest";
+import { ingestNormalizedInbound, ingestZernioInbound, waIdentityFrom } from "@/lib/channels/zernio/ingest";
+import { lerEnvelopeUazapi } from "@/lib/channels/uazapi/envelope";
 import { verifyZernioSignature } from "@/lib/channels/zernio/webhook";
 import { acceptsInboundWebhook, handleInboundWebhook } from "@/lib/channels/inbound";
 
@@ -259,6 +261,34 @@ describe("o que a ingestão GRAVA", () => {
     expect(ins.type).toBe("image");
     // A url é endpoint AUTENTICADO e expira: guardar é ponteiro, não conteúdo.
     expect(ins.metadata).toEqual({ provider_attachments: [{ type: "image", url: "https://z/media/1" }] });
+  });
+
+  it("documento recebido guarda o NOME original em metadata.media_filename (#2613)", async () => {
+    // Payload real do canal hospedado: sem esta chave, o cartão do Inbox e o
+    // download mostravam o documento sem nome (medido na instalação de teste).
+    const bruto = readFileSync("tests/fixtures/uazapi/messages-inbound-documento.json", "utf8");
+    // O nome como o WhatsApp o mandou (o payload real vem com acento decomposto).
+    const nome = (JSON.parse(bruto) as { message: { content: { fileName: string } } }).message.content.fileName;
+    const lido = lerEnvelopeUazapi(bruto);
+    if (!lido.ok || lido.event.kind !== "message") throw new Error("esperava mensagem");
+    await ingestNormalizedInbound(admin, {
+      ...ENTRADA,
+      message: lido.event.message,
+      source: { label: "Uazapi", origin: "uazapi_webhook", channel: "uazapi" },
+    });
+    const ins = ops.find((o) => o.tabela === "messages" && o.op === "insert")?.payload as Record<string, unknown>;
+    expect(ins.type).toBe("document");
+    expect(ins.metadata).toMatchObject({ media_filename: nome });
+    expect(nome.normalize("NFC")).toBe("Catálogo de teste PDF.pdf");
+  });
+
+  it("anexo sem nome não inventa um", async () => {
+    await ingestZernioInbound(admin, {
+      ...ENTRADA,
+      payload: evento({ attachments: [{ type: "document", url: "https://z/media/2" }] }),
+    });
+    const ins = ops.find((o) => o.tabela === "messages" && o.op === "insert")?.payload as Record<string, unknown>;
+    expect(ins.metadata).not.toHaveProperty("media_filename");
   });
 
   it("grava o TELEFONE mesmo quando a âncora é o id opaco", async () => {

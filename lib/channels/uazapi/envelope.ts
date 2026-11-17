@@ -301,7 +301,17 @@ export function lerEnvelopeUazapi(rawBody: string): UazapiEnvelopeResult {
         externalId,
         accountId: null,
         text,
-        attachments: tipoDaMidia && referenciaDaMidia ? [{ type: tipoDaMidia, url: referenciaDaMidia }] : [],
+        attachments:
+          tipoDaMidia && referenciaDaMidia
+            ? [
+                {
+                  type: tipoDaMidia,
+                  url: referenciaDaMidia,
+                  // O nome original do documento (#2613); sem ele, a chave nem entra.
+                  ...(str(content?.fileName) ? { filename: str(content?.fileName) } : {}),
+                },
+              ]
+            : [],
         sentAt,
         ...(location ? { location } : {}),
         identity: {

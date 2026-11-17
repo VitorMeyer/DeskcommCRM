@@ -27,6 +27,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { logger } from "@/lib/logger";
 import { audit } from "@/lib/audit";
 import { corpoDaLocalizacao } from "@/lib/messaging/localizacao";
+import { CHAVE_DO_NOME_NA_METADATA, nomeDeArquivoLimpo } from "@/lib/messaging/media/nome-de-arquivo";
 import { encontrarContatoPorTelefone } from "@/lib/channels/contato-por-telefone";
 import { canonicalPhoneBR } from "@/lib/channels/phone-variants";
 import { marcarConversaComMensagem } from "@/lib/channels/marcar-conversa";
@@ -893,6 +894,7 @@ async function insertMessage(
   const { msg, eco } = input;
   const temAnexo = msg.attachments.length > 0;
   const primeiro = msg.attachments[0];
+  const nomeDoArquivo = nomeDeArquivoLimpo(primeiro?.filename);
   // O anúncio DESTA mensagem, quando ela nasceu de um clique. O contato guarda
   // só o primeiro (primeiro toque, em `efeitosDaEntrada`); sem este rastro, quem
   // volta por OUTRO anúncio aparece na conversa como se viesse do antigo.
@@ -956,7 +958,10 @@ async function insertMessage(
         : {}),
       metadata: {
         ...(temAnexo
-          ? { provider_attachments: msg.attachments }
+          ? {
+              provider_attachments: msg.attachments,
+              ...(nomeDoArquivo ? { [CHAVE_DO_NOME_NA_METADATA]: nomeDoArquivo } : {}),
+            }
           : msg.location
             ? { location: msg.location }
             : {}),

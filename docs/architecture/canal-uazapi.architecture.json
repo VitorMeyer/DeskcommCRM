@@ -3,7 +3,7 @@
   "diagram_type": "architecture",
   "meta": {
     "title": "Canal hospedado Uazapi — estado parcial observado",
-    "subtitle": "Conexão por tenant, envio pelo seam e entrada normalizada; religar sessão, edição inbound e prova viva ainda pendentes",
+    "subtitle": "Conexão por tenant ligada pelo módulo da instalação, envio pelo seam, entrada normalizada com grupo, edição e reação; religar sessão e prova viva ainda pendentes",
     "output": "canal-uazapi.html",
     "quality_profile": "standard"
   },
@@ -19,10 +19,10 @@
     { "id": "sessao-api", "lane": "app", "col": 1, "type": "service", "label": "Rotas hospedadas: RBAC/MFA, validação, auditoria" },
     { "id": "credenciais", "lane": "persistencia", "col": 2, "type": "database", "label": "channel_sessions: credenciais cifradas, org e referência" },
     { "id": "uazapi-api", "lane": "uazapi", "col": 3, "type": "external", "label": "API remota: status, pareamento, envio e download autenticado" },
-    { "id": "adapter", "lane": "app", "col": 2, "type": "service", "label": "Adapter registrado no seam: JID, texto, mídia, contato e localização" },
+    { "id": "adapter", "lane": "app", "col": 2, "type": "service", "label": "Adapter registrado no seam: JID, texto, mídia, contato, localização, reação, grupos e filtro de grupos" },
     { "id": "handler-envio", "lane": "app", "col": 1, "type": "service", "label": "Handler comum: guardas, antes do envio, persistência e auditoria" },
     { "id": "webhook", "lane": "app", "col": 4, "type": "service", "label": "Webhook neutro: token opaco de sessão, arquivo sanitizado" },
-    { "id": "parser", "lane": "app", "col": 5, "type": "service", "label": "Parser: mensagens, ACKs, apagamento, localização e conexão; reação e tipo sem suporte ignorados" },
+    { "id": "parser", "lane": "app", "col": 5, "type": "service", "label": "Parser: mensagens (o cliente da enviada pelo celular é o chat), ACKs, apagamento, edição, reação, grupo, localização e conexão" },
     { "id": "ingest", "lane": "app", "col": 6, "type": "service", "label": "Ingest normalizada compartilhada: identidade, dedup, comandos e desfecho (tique único, sem rebaixar)" },
     { "id": "mensagens", "lane": "persistencia", "col": 7, "type": "database", "label": "messages/conversations: histórico tenant-aware" },
     { "id": "fila-envio", "lane": "persistencia", "col": 8, "type": "database", "label": "send ledger/job queue: 429 adiado; 463 encerra retry automático" },
@@ -30,7 +30,11 @@
     { "id": "saude", "lane": "app", "col": 5, "type": "service", "label": "Saúde da sessão e aviso acionável da conexão" },
     { "id": "central", "lane": "operacao", "col": 6, "type": "ui", "label": "Central de avisos e Conexões para reparar" },
     { "id": "estado-sessao", "lane": "app", "col": 3, "type": "service", "label": "Estado da sessão pareada: número só quando conectada; conflito de número nomeado" },
-    { "id": "pendencias", "lane": "app", "col": 7, "type": "service", "label": "Pendente: religar sessão parada, edição inbound, reação, presença e prova contra a API viva" }
+    { "id": "pendencias", "lane": "app", "col": 7, "type": "service", "label": "Pendente: religar sessão parada, tirar o webhook ao remover, paridade (checar número, agenda, Status) e prova contra a API viva" },
+    { "id": "modulo", "lane": "operacao", "col": 1, "type": "ui", "label": "Administração › Sistema: módulo canal_uazapi (oferta da aba e da rota de conectar)" },
+    { "id": "webhook-remoto", "lane": "app", "col": 2, "type": "service", "label": "Webhook da conexão na instância: modo avançado, só o do CRM, filtro isGroupYes" },
+    { "id": "grupos", "lane": "app", "col": 6, "type": "service", "label": "Caminho único de grupo (lib/grupos): só grupo ligado; message.group_received" },
+    { "id": "reacao", "lane": "app", "col": 6, "type": "service", "label": "Módulo único de reação (lib/channels/reacao): linha ligada ao alvo, sem carimbar a conversa" }
   ],
   "edges": [
     { "from": "conexoes", "to": "sessao-api", "label": "URL/token e escolha de pareamento" },
@@ -52,10 +56,19 @@
     { "from": "saude", "to": "central", "label": "aviso por episódio; retorno resolve" },
     { "from": "central", "to": "conexoes", "label": "orientação para reparar a sessão" },
     { "from": "adapter", "to": "pendencias", "label": "lacunas de retry e operação automática" },
-    { "from": "webhook", "to": "pendencias", "label": "edição inbound sem consumidor: falta payload real capturado" },
+    { "from": "webhook", "to": "pendencias", "label": "endereço girado ao remover: o webhook antigo responde 404 até a próxima conexão" },
     { "from": "sessao-api", "to": "estado-sessao", "label": "consulta de estado, QR e código de pareamento" },
     { "from": "estado-sessao", "to": "credenciais", "label": "status, carimbo de mudança e número observado" },
     { "from": "estado-sessao", "to": "conexoes", "label": "phone_number_conflict: número já ativo em outro canal" },
-    { "from": "parser", "to": "mensagens", "label": "apagar para todos carimba revoked_at; a linha permanece" }
+    { "from": "parser", "to": "mensagens", "label": "apagar para todos carimba revoked_at; a linha permanece" },
+    { "from": "modulo", "to": "conexoes", "label": "ligado, a aba aparece; desligado, some (conexão feita segue)" },
+    { "from": "modulo", "to": "sessao-api", "label": "desligado, conectar responde 404" },
+    { "from": "sessao-api", "to": "webhook-remoto", "label": "registra o webhook da conexão antes de salvar" },
+    { "from": "webhook-remoto", "to": "uazapi-api", "label": "GET /webhook e add/update/delete só do CRM" },
+    { "from": "parser", "to": "grupos", "label": "mensagem de @g.us nunca vai ao fluxo individual" },
+    { "from": "grupos", "to": "mensagens", "label": "conversa do grupo, autor em metadata.group_sender" },
+    { "from": "adapter", "to": "webhook-remoto", "label": "setGroupIntake: liga/desliga grupos com troca confirmada" },
+    { "from": "parser", "to": "reacao", "label": "reaction = id do alvo, text = emoji" },
+    { "from": "reacao", "to": "mensagens", "label": "type=reaction ligada ao alvo" }
   ]
 }

@@ -4373,6 +4373,53 @@ não entram aqui. Quem liga é a empresa, em `/app/settings/tenant`, cartão Cat
 | J68.6 | Desligar de novo | o valor some da tela e continua no banco | Tela: **NÃO MEDIDO** |
 | J68.7 | Editar só o preço de um produto com estoque | quantidade, controle de estoque e `ativo` não mudam | **PASS (unit)** — `app/api/v1/products/[id]/route.test.ts`. Tela: **NÃO MEDIDO** |
 
+## J69 — Conectar um número pelo WhatsApp hospedado (uazapi) e atender por ele `[P0]` (2026-11-17)
+
+Contexto: PRD 07 (`docs/prd/07-prd-uazapi-canal.md`). Módulo da instalação `canal_uazapi`,
+desligado de fábrica; a empresa conecta uma instância criada no painel da uazapi colando URL e
+token. Onde rodar: a instalação de teste do dono, com uma instância **paga** (a gratuita expira em
+~1 h e derruba o teste no meio). Evidência em `evidence/canal-uazapi/`.
+
+Preparação, uma vez: (a) o dono do servidor liga "WhatsApp hospedado (uazapi)" em Administração ›
+Sistema; (b) a instância está criada no painel da uazapi, **sem número pareado**; (c) um segundo
+celular faz o papel do cliente; (d) um grupo de teste com o número da empresa e o celular do cliente.
+
+| # | Caso | Expectativa | Resultado |
+|---|------|-------------|-----------|
+| J69.1 `[P0]` | Ligar o módulo em Administração › Sistema | a aba "Uazapi" aparece em Conexões; desligado, ela some e `GET /api/v1/channels/hosted-session` responde 404 | |
+| J69.2 `[P0]` | Colar URL e token **errado** | "Token recusado pelo servidor." escrito na aba; nada gravado | |
+| J69.3 `[P0]` | Colar URL e token certos | "Servidor validado e conexão salva."; a aba mostra a conexão sem número | |
+| J69.4 `[P0]` | Gerar QR Code e ler pelo celular da empresa | enquanto o QR está na tela, o estado **não** é "conectado"; depois de ler, conectado com o número | |
+| J69.5 `[P1]` | Parear por código (telefone) em vez de QR | o código aparece e, digitado no celular, conecta | |
+| J69.6 `[P1]` | A instância já tinha outro webhook no painel da uazapi (ex.: uma automação) | depois de conectar, o webhook dela continua lá, ao lado do do CRM | |
+| J69.7 `[P0]` | O cliente manda "oi" | conversa nova no Inbox, com o nome e o telefone do cliente | |
+| J69.8 `[P0]` | O atendente responde pelo Inbox | chega no celular do cliente; os tiques passam a entregue e lido, sem voltar atrás | |
+| J69.9 `[P0]` | O dono responde **pelo celular da empresa** | a mensagem entra na MESMA conversa do cliente (nenhum contato novo com o número da empresa) e a IA pausa nessa conversa | |
+| J69.10 `[P1]` | O cliente manda foto, áudio e documento | os três aparecem e abrem; o áudio toca | |
+| J69.11 `[P1]` | O atendente manda foto, documento, áudio gravado, contato e localização | os cinco chegam no celular do cliente | |
+| J69.12 `[P1]` | O cliente **edita** uma mensagem | a conversa mostra o texto novo na mesma bolha; nenhuma bolha duplicada | |
+| J69.13 `[P1]` | O cliente **reage** com 👍 a uma mensagem nossa | a reação aparece sobre a mensagem; tirar a reação a remove | |
+| J69.14 `[P1]` | O atendente reage pelo Inbox | a reação chega no celular do cliente | |
+| J69.15 `[P1]` | O cliente **apaga para todos** | a mensagem fica no histórico, marcada como apagada | |
+| J69.16 `[P0]` | Alguém escreve no grupo de teste, **sem** o grupo ligado | nada aparece no Inbox; nenhum contato novo; a IA não responde | |
+| J69.17 `[P1]` | Conexões › Grupos lista os grupos do número; ligar o grupo de teste | mensagens do grupo entram numa conversa do GRUPO, com o nome de quem escreveu em cada bolha; a IA não responde | |
+| J69.18 `[P2]` | Ligar "IA responde" naquele grupo | a IA passa a responder no grupo | |
+| J69.19 `[P1]` | Desligar o último grupo ligado | mensagens de grupo param de chegar | |
+| J69.20 `[P0]` | Agente de IA publicado, com acesso a este número | responde o cliente por este canal, com "digitando…" antes; caso que atravessa o agente mede o PAR (a tela + a ferramenta chamada direto, com o mesmo texto) | |
+| J69.21 `[P1]` | Desconectar e reconectar por QR | o estado muda na hora; reconectado, as conversas seguem nas mesmas linhas | |
+| J69.22 `[P1]` | Trocar o token por o de OUTRA instância, com o número desconectado | a conexão continua sendo a mesma linha (histórico e acesso da IA preservados) | |
+| J69.23 `[P1]` | Remover a conexão | a aba volta ao formulário vazio; a instância continua no painel da uazapi; as conversas ficam no histórico | |
+| J69.24 `[P2]` | Desligar o módulo com a conexão ativa | a aba some; mensagens do cliente continuam chegando | |
+
+Casos do dono do produto (a preencher): cada um com quem manda o quê, por onde, e o que deveria
+acontecer na tela — vira linha `J69.25+` nesta tabela e, quando der, teste automatizado com o
+payload real capturado.
+
+Fora deste roteiro, conhecido: (1) remover a conexão gira o endereço de entrada, mas o webhook
+antigo do CRM fica na instância apontando para um endereço que responde 404 até a próxima conexão
+(que o reaproveita); (2) o limite temporário do WhatsApp (erro 463) não é provocável sob comando —
+registrar se acontecer; (3) uma sessão parada não religa sozinha.
+
 ## E-mail da organização — conta e domínio (#3443 + #3464)
 
 **Estado:** spec `conta-resend-da-organizacao.spec.ts` verde no CI em `d531c6ebe` (27/10,

@@ -1,13 +1,17 @@
 # PRD 07 — Canal uazapi (WhatsApp não-oficial)
 
-**Status:** Em implementação — aceite ainda não demonstrado | **Versão:** 1.1 | **Data:** 2026-10-13
+**Status:** Em implementação — aceite ainda não demonstrado | **Versão:** 1.2 | **Data:** 2026-11-17
 
-> **Estado de execução em 2026-10-13.** Legenda: ✅ provado por teste automatizado (unitário ou de banco); 🟡 implementado, **sem** prova contra a API viva nem pela tela; `[ ]` não feito.
+> **Estado de execução em 2026-11-17.** Legenda: ✅ provado por teste automatizado (unitário ou de banco); 🟡 implementado, **sem** prova contra a API viva nem pela tela; `[ ]` não feito.
 >
-> - **Onde está o código.** Branch `feat/canal-uazapi`, worktree `~/orca/DeskcommCRM-uazapi`, base `upstream/main`. Commitado em `origin/feat/canal-uazapi` (o fork), **sem PR**; instalação de teste no ar desde 2026-10-13. A migration já foi renumerada cinco vezes porque o canônico anda ~200 commits/dia e não há reserva de número: `0444` → `0485` → `0501` → `0505` → `0594` → hoje **`20261014100000_0659_canal_uazapi.sql`** (em 2026-10-13 a `main` ia até `0654`/`20261014000001` e os PRs abertos reivindicavam até `0658`/`20261014090000`, ambos do #2820; a `0594` virou `assumir_interrompe_turno_autonomo` no canônico). Sincronizada com o canônico em 2026-10-13 (`0c05ca348`, v1.80.0, 1.125 commits depois da sincronização de 2026-10-07), por stash nomeado, fast-forward e reaplicação do trabalho não commitado; três conflitos resolvidos à mão: `lib/channels/arquivo-de-webhook.ts` (a lista de cabeçalhos proibidos soma `asaas-access-token` do upstream com `token`/`admintoken` nossos), `dicionario.ts` (soma) e `baseline.sql` (o apêndice soma; e o `webhook_events_log_provider_check` une `'uazapi'` com `'stripe'`/`'asaas'` da 0601). Fusão semântica corrigida fora do conflito: a migration nossa redefine esse mesmo CHECK e, por rodar depois da 0601, estreitaria a lista — ganhou `'stripe'` e `'asaas'`. Na sincronização de 2026-10-07 o ponto equivalente foi o `send-ledger` (o caminho pela PK passou a devolver também o prazo de nova tentativa; sem isso o 463/429 perderia o `retry_after_at`), que desta vez o upstream não tocou. Antes de abrir PR: `git fetch upstream && git merge upstream/main` e `pnpm checar:colisao-de-migration` mais `gh pr list --repo melgarafael/DeskcommCRM --state open --limit 500 --json number,files` (o `checar` só enxerga migration commitada).
-> - **O que tem prova.** Baseline em INSTALL e UPDATE com `ON_ERROR_STOP=1` e invariantes de banco (`pnpm test:db`; a nova é `tests/invariants/canal-uazapi.test.ts`: união de referências, unicidade, isolamento entre tenants e auto-cura do apêndice); parser contra fixtures de formato real; ACK e apagamento pelo mesmo passo dos outros canais; token fora do arquivo de webhooks; envio, sessão e credencial com o `fetch` simulado; corpos e respostas conferidos contra a especificação OpenAPI v2.4.2 (seção abaixo).
-> - **O que NÃO tem prova.** Nenhuma chamada a uma instância real (as fixtures são sanitizadas de capturas parciais do spike); nenhuma prova pela tela (`curl` e teste de rota não contam); nenhum E2E; instalação fresca com o canal ligado.
-> - **Achados desta rodada, já corrigidos** (todos por gate que os testes de unidade sozinhos não pegariam): o baseline **não instalava** num banco novo (índice único antes de `archived_at` existir, 42703); um 463 deixava o job de posse do worker, que o reagendava e, ao esgotar as tentativas, abria alerta crítico `job_dead`; recibo de leitura do próprio dono virava "lida" na linha do cliente; desconectar apagava o número da conexão; o ACK ignorava a regra de tique único do passo comum.
+> - **Onde está o código.** Branch `feat/canal-uazapi` do fork (`origin`), atualizada com o canônico (`upstream/main` 4cf6fd0ce, 7.331 commits, 22 conflitos resolvidos à mão). **Decisão do dono (2026-11-17): o trabalho fica no fork**, sempre atualizado com o canônico; sem issue nem PR por ora. O molde de provider novo no canônico é o commit do robô do Telegram (`3f5699b7d`, #3440).
+> - **Migration:** `20261117180233_9412_canal_uazapi.sql` (a `0659` colidiu com o canônico). Número medido por `pnpm checar:colisao-de-migration` contra 127 PRs abertos. Ela reescreve três CHECKs com a lista **inteira** — sem isso, rodando depois da `9342`, apagaria `'telegram'` do vocabulário, e o git não acusa. Descreve-se só no cabeçalho `-- manifest:` (o `MANIFEST.md` não recebe linha nova; `manifest-x-migrations.test.ts`).
+> - **Liga pela tela.** `UAZAPI_ENABLED` saiu: o canal é o módulo da instalação `canal_uazapi` (Administração › Sistema), no molde do `canal_bot`. O módulo decide a OFERTA (aba e rota de conectar respondem 404 desligado); conexão já feita segue atendendo.
+> - **Payloads reais.** Mensagem pelo celular, edição, reação e grupo vieram de capturas públicas (github.com/TitoBahe/uazapi-webhook-events-examples), sanitizadas em `tests/fixtures/uazapi/`. A especificação conferida agora é a **v2.6.9** do OpenAPI.
+> - **O que tem prova.** `pnpm test:db`: install e update do baseline com `ON_ERROR_STOP=1`, 204 regras de isolamento no banco. Typecheck e lint verdes. Testes do canal contra fixtures reais; sabotagem medida: desfazer o conserto da mensagem pelo celular derruba 1 caso de 55, desfazer o desvio de grupo derruba 4 de 55.
+> - **O que NÃO tem prova.** Nenhuma chamada à instância real depois desta rodada; prova pela tela pendente — o roteiro é a jornada **J69** de `docs/testing/user-journey-map.md`, a rodar na instalação de teste com uma instância paga.
+> - **Instalação de teste:** atualizada em 2026-11-17 para `1.116.0+uazapi.026a673` (banco reaplicado do baseline desta branch na 1ª passada, sem erro inesperado); o roteiro J69 roda nela.
+> - **Histórico:** as rodadas de 2026-09-28 a 2026-10-14 (renumerações, sincronizações por stash, primeiro teste vivo com instância gratuita) estão no `git log` da branch e na versão 1.1 deste PRD.
 
 ---
 
@@ -45,7 +49,7 @@ Integrar a **uazapi** como sexto transporte de WhatsApp do DeskcommCRM, ao lado 
   - `disconnect`: encerra a sessão, exige novo QR.
   - Sem `delete`: apagar a instância no serviço não é papel do CRM (ver o item acima). Excluir o canal é a rota comum, que desconecta pelo `disconnect`.
 - 🟡 Rotas de QR e pareamento que testam se o método existe, reutilizando o `PairingOptions` para WAHA e uazapi; falta E2E.
-- 🟡 Webhook: registra via `POST /webhook` (instância token). Filtro automático `excludeMessages: ["wasSentByApi"]` para cortar eco; falta comprovação contra API real.
+- ✅ Webhook: registrado pelo modo AVANÇADO (`action: add|update|delete`) em `lib/channels/uazapi/webhook-remoto.ts` — o modo simples sobrescrevia o webhook que o cliente já tinha na instância. O do CRM é achado pela rota de entrada; o de outra origem nunca é tocado; sobras desta instalação são reaproveitadas. Filtros: `wasSentByApi` sempre, `isGroupYes` enquanto nenhum grupo está ligado. Falta comprovação contra a API real (J69.6).
 - 🟡 Parser + processador normalizado de eventos em `lib/channels/uazapi/`:
   - Dedup por `(organization_id, messageid)` (não é `id`).
   - Echo (`wasSentByApi:false` + filtro).
@@ -55,8 +59,13 @@ Integrar a **uazapi** como sexto transporte de WhatsApp do DeskcommCRM, ao lado 
   - Edição e apagamento.
   - Presença (digitando/gravando).
   - Eventos de conexão → sincroniza saúde e warm-up.
-- Estado observado: mensagens, dedup compartilhada, identidade PN/LID, localização recebida, ACKs (pelo passo de desfecho comum), apagar-para-todos (`revoked_at`, a linha permanece) e transições de conexão (com `last_status_change_at` só quando o status muda). **Ignorados de propósito:** presença (o webhook nem a assina — cada "digitando…" seria uma linha no arquivo de webhooks), reação (`reaction` preenchido), recibo que partiu do próprio número (`IsFromMe`, é leitura de mensagem *recebida*) e tipo sem texto nem mídia (o corpo fica em `webhook_events_log`; o reprocessador automático hoje só atende o WAHA, então recuperar é manual). **Pendente:** edição feita pelo cliente — a especificação não diz em que evento chega e não há payload real capturado; não vou adivinhar.
-- 🟡 Adapter de envio (`send`, `resolveRecipient`): texto, mídia, contato e localização estão implementados; reação ainda não está integrada ao contrato de mensagens. 463 fica `queued`, abre aviso deduplicado na Central e encerra o job sem reenvio automático; 429 persiste `Retry-After` e agenda o reenvio durável no caminho de agente/automação. Os dois caminhos têm testes unitários; prova E2E ainda pendente.
+- Estado observado: mensagens, dedup compartilhada, identidade PN/LID, localização recebida, ACKs (pelo passo de desfecho comum), apagar-para-todos (`revoked_at`, a linha permanece) e transições de conexão (com `last_status_change_at` só quando o status muda).
+  - ✅ **Mensagem pelo celular do dono** (`fromMe`): o cliente é o `chatid` (+ `chat.wa_chatlid`); `sender_pn`/`sender_lid` são do PRÓPRIO número da empresa (payload real) e não entram na identidade. Pausa a IA pelo passo comum.
+  - ✅ **Edição** (payload real): chega como mensagem nova com `edited` = id da original; altera a original (`aplicarEdicaoZernio`), sem duplicar a fala.
+  - ✅ **Reação**: recebida pelo módulo único `gravarReacaoDeMensagem` (#2797), enviada por `sendReaction` (`POST /message/react`, só `id` e `text`), `podeReagir: true`.
+  - ✅ **Grupo**: vai para `gravarMensagemDeGrupo` (`lib/grupos/`), o mesmo caminho do canal por QR — só grava grupo ligado em Conexões › Grupos, o banco emite `message.group_received` (IA, follow-up e automação não enxergam grupo, salvo `ia_responde`). O adapter tem `listGroups` (paginado, sem participantes) e `setGroupIntake` (filtro `isGroupYes` no webhook desta conexão, com troca confirmada por releitura). Antes, a mensagem de grupo entrava como conversa individual com quem escreveu.
+  - **Ignorados de propósito:** presença (o webhook nem a assina), recibo que partiu do próprio número (`IsFromMe`), eventos `groups` (entrar/sair) e tipo sem texto nem mídia (o corpo fica em `webhook_events_log`; o reprocessador automático hoje só atende o WAHA).
+- 🟡 Adapter de envio (`send`, `resolveRecipient`): texto, mídia, contato, localização e reação estão implementados. 463 fica `queued`, abre aviso deduplicado na Central e encerra o job sem reenvio automático; 429 persiste `Retry-After` e agenda o reenvio durável no caminho de agente/automação. Os dois caminhos têm testes unitários; prova E2E ainda pendente.
 - 🟡 Métodos opcionais do adapter:
   - `fetchInboundMedia`: chama `POST /message/download`, retorna URL pública por 2 dias.
   - `checkHealth`: `GET /instance/status`.
@@ -64,7 +73,7 @@ Integrar a **uazapi** como sexto transporte de WhatsApp do DeskcommCRM, ao lado 
   - `editMessage` / `revokeMessage`: `POST /message/edit` e `POST /message/delete`.
 - 🟡 Vigia: o `channel-health` (genérico, via `checkHealth` do adapter) **já cobre** o uazapi — corrige o espelho e abre o aviso. O `session-reconciler` (worker) segue só WAHA e **não** religa sessão uazapi; o redrive dele já exclui sessões sem `waha_session_name`. Religar `STOPPED` é decisão em aberto (seção abaixo).
 - ✅ Testes de matriz, vocabulário, isolamento RLS (invariante de banco) e `lint:channels`. `[ ]` E2E: um dublê HTTP local **não serve** aqui — a URL do servidor é entrada do tenant e o app recusa `http:` e IP privado em produção (guarda anti-SSRF); enfraquecê-la só para teste seria pior que não ter o E2E. Ver "Próximos passos".
-- 🟡 Flag de instalação `UAZAPI_ENABLED` (desligada por padrão, como `DATAFY_ENABLED`): ausente, a aba some e as rotas respondem 404; clone fresco e fluxo de instalação por provar pela tela.
+- ✅ Módulo da instalação `canal_uazapi` (Administração › Sistema, desligado de fábrica, molde do `canal_bot`): desligado, a aba some e a rota de conectar responde 404 (`app/api/v1/channels/hosted-session/route.test.ts`); conexão já feita segue atendendo. Substitui o antigo `UAZAPI_ENABLED`, que saiu do `.env` — o canônico decidiu que liga/desliga mora na tela. Prova pela tela: J69.1.
 - ✅ Changelog com fragmento `.changes/` (`pnpm release:conferir` valida a forma). O texto vira nota pública: revisão humana antes do corte.
 
 ### Não entra (V2 ou nunca)
@@ -94,11 +103,14 @@ Conferido campo a campo contra `https://docs.uazapi.com/openapi-bundled.json` (v
 
 ---
 
-## Decisões em aberto (do dono do produto)
+## Decisões do dono do produto
 
-1. **Religar sessão `STOPPED` sozinho?** O Fase 2 pede "reconecta sessões `STOPPED`", mas aqui `STOPPED` mistura `disconnected` (quase sempre deslogado — `connect` só gera um QR novo, que expira e volta a `STOPPED`, alternando `SCAN_QR_CODE`/`STOPPED` a cada minuto e gerando aviso à toa) e `hibernated` (sem endpoint de reativação; o próprio PRD já decidiu congelar). **Recomendação:** não religar automaticamente na v1; o `channel-health` já avisa e a pessoa clica em "Gerar QR Code". Implementado assim.
-2. **Reação (enviar e receber).** Sem modelo de reação no CRM para nenhum canal; fazer só para este seria um recurso novo do produto. **Recomendação:** fora do MVP; a reação recebida é ignorada.
-3. **Edição feita pelo cliente.** Depende de capturar o payload real (Fase 0). Enquanto isso, a mensagem editada mantém o texto original no CRM.
+Tomadas em 2026-11-17: (a) o trabalho fica no **fork**, atualizado com o canônico; (b) **grupos são modelados** (feito, ver Escopo); (c) **reação entra** — o canônico já tem reação como recurso do produto (feito); (d) a edição foi resolvida pelo payload real (feito).
+
+Em aberto:
+
+1. **Religar sessão `STOPPED` sozinho?** `STOPPED` mistura `disconnected` (quase sempre deslogado — `connect` só gera um QR novo, que expira e volta a `STOPPED`, alternando estados e gerando aviso à toa) e `hibernated` (sem endpoint de reativação). **Recomendação:** não religar automaticamente; o `channel-health` já avisa e a pessoa clica em "Gerar QR Code". Implementado assim.
+2. **Criar a instância pela tela com o `admintoken`.** Tira o passo "vá ao painel da uazapi", mas o `admintoken` abre o SERVIDOR inteiro (todas as instâncias, inclusive as que não são do CRM). **Recomendação:** depois do roteiro J69; se entrar, guardado só no nível da instalação (/admin/sistema), nunca por empresa.
 
 ---
 
@@ -347,10 +359,11 @@ Capturas versionadas em `evidence/canal-uazapi/`, e o que cada uma prova:
 
 ## Próximos passos
 
-1. **Validação viva (Fase 0 que ficou pela metade).** Com uma instância real: conectar pela tela, mandar e receber texto/áudio/imagem, ver entregue/lido, apagar uma mensagem, provocar um 463 se possível, e capturar os payloads que faltam (edição, reação, grupo). Cada captura vira fixture sanitizada em `tests/fixtures/uazapi/`.
-2. **Prova pela tela em ambiente fresco** (DoD 8 e 4): banco do `baseline.sql` + `bootstrap-owner`, `UAZAPI_ENABLED=true` e também **ausente**, Playwright. O servidor→uazapi só se prova com uma instância real (HTTPS público); o dublê local é barrado pelo guarda anti-SSRF de propósito.
-3. **Antes do PR:** `git fetch upstream && git merge upstream/main`; `pnpm checar:colisao-de-migration`; suíte inteira; `pnpm test:db` e `pnpm test:db:update`; `pnpm build`; sabotar o que o PR corrige. Identidade dos commits e "O que NÃO medi" no corpo.
-4. Decidir as três questões abertas acima.
+1. **Rodar o roteiro J69** (`docs/testing/user-journey-map.md`) na instalação de teste, com uma instância PAGA (a gratuita expira em ~1 h). Cada caso que falhar: capturar o payload real daquele evento, virar fixture sanitizada e teste antes do conserto. Os casos de uso do dono entram como `J69.25+`.
+2. **Remover a conexão também tira o webhook do CRM da instância** (hoje o endereço gira e o webhook antigo fica respondendo 404 até a próxima conexão, que o reaproveita). `removerWebhookDaConexao` já existe; falta a rota de exclusão chamá-lo por um método opcional da sessão.
+3. **Paridade com o que o canônico já consome** e o canal ainda não implementa: `numeroTemConta` (`/chat/check`), foto/nome do contato (`/chat/details`), agenda (`listPhonebook` via `/contacts/list`), Status (`publishStatus` via `/send/status`), menções em grupo. Cada um vira `true` na matriz junto com o método.
+4. **A entrada "responde antes de processar"** (`CANAIS_QUE_RESPONDEM_ANTES`) e o reprocessamento pelo cron `webhook-replay` hoje servem só ao intermediado: estender a este canal, que entrega poucas vezes.
+5. **Antes de cada sincronização:** `git fetch upstream && git merge upstream/main`; conferir as listas dos três CHECKs contra a última migration do canônico que os toca; `pnpm checar:colisao-de-migration`; suíte inteira, `pnpm test:db`, `pnpm build`.
 
 ---
 

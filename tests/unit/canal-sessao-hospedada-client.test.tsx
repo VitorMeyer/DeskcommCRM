@@ -41,7 +41,7 @@ vi.mock("@/components/connections/PairingOptions", () => ({
   ),
 }));
 
-import { CanalSessaoHospedadaClient } from "@/components/connections/CanalSessaoHospedadaClient";
+import { CanalSessaoHospedadaClient, seguirConsultandoEstado } from "@/components/connections/CanalSessaoHospedadaClient";
 import { apiClient } from "@/lib/api/client";
 
 const ROTA = "/api/v1/channels/hosted-session";
@@ -283,5 +283,29 @@ describe("remover a conexão", () => {
     expect(await screen.findByRole("button", { name: "Validar e conectar" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Remover conexão" })).toBeNull();
     expect(screen.getByLabelText("URL do servidor")).toHaveValue("");
+  });
+});
+
+describe("até quando a tela consulta o estado", () => {
+  const conectado = { status: "WORKING", phoneNumber: "5511900000001" };
+  const semNumero = { status: "WORKING", phoneNumber: null };
+
+  it("conectado e SEM número segue consultando — é a consulta que grava o número", () => {
+    // Medido na instalação de teste: o webhook gravou WORKING antes da consulta,
+    // a tela parou no primeiro WORKING e a conexão ficou sem número.
+    expect(seguirConsultandoEstado(semNumero, undefined)).toBe(true);
+    expect(seguirConsultandoEstado(semNumero, { ...semNumero, credential_rejected: false })).toBe(true);
+  });
+
+  it("para quando o número aparece, venha ele da conexão gravada ou da consulta", () => {
+    expect(seguirConsultandoEstado(conectado, undefined)).toBe(false);
+    expect(seguirConsultandoEstado(semNumero, conectado)).toBe(false);
+  });
+
+  it("com o QR na tela segue consultando; token recusado para de vez", () => {
+    expect(seguirConsultandoEstado({ status: "SCAN_QR_CODE", phoneNumber: null }, undefined)).toBe(true);
+    expect(
+      seguirConsultandoEstado(semNumero, { status: "FAILED", phoneNumber: null, credential_rejected: true }),
+    ).toBe(false);
   });
 });

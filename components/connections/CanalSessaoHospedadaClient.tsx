@@ -49,6 +49,25 @@ function imagemDoQr(valor: string | null): string | null {
   return `data:image/png;base64,${valor}`;
 }
 
+/**
+ * A tela segue consultando o estado (a cada 5 s) até a conexão estar WORKING COM
+ * o número gravado — é a consulta que grava o número.
+ *
+ * Parar no primeiro WORKING deixava a conexão sem número quando o webhook da
+ * instância gravava o WORKING antes da consulta seguinte (medido na instalação de
+ * teste, 2026-11-17). Token recusado para de vez: ele não melhora sozinho, e
+ * consultar só acumularia erro.
+ */
+export function seguirConsultandoEstado(
+  session: Pick<Sessao, "status" | "phoneNumber"> | null,
+  estado: Pick<EstadoPareamento, "status" | "phoneNumber" | "credential_rejected"> | undefined,
+): boolean {
+  if (estado?.credential_rejected) return false;
+  const conectadoComNumero = (s: { status: string; phoneNumber: string | null } | null | undefined) =>
+    s?.status === "WORKING" && Boolean(s.phoneNumber);
+  return !(conectadoComNumero(session) || conectadoComNumero(estado));
+}
+
 export function CanalSessaoHospedadaClient({ label }: { label: string }) {
   const t = useT();
   const queryClient = useQueryClient();
@@ -71,9 +90,7 @@ export function CanalSessaoHospedadaClient({ label }: { label: string }) {
     queryFn: async () =>
       (await apiClient.get<{ data: EstadoPareamento }>(`${ROTA}/${session!.id}`)).data,
     enabled: Boolean(session?.id),
-    // Token recusado não melhora sozinho: consultar a cada 5 s só acumularia erro.
-    refetchInterval: (query) =>
-      session?.status === "WORKING" || query.state.data?.credential_rejected ? false : 5000,
+    refetchInterval: (query) => (seguirConsultandoEstado(session, query.state.data) ? 5000 : false),
   });
 
   const serverUrl = serverUrlEditada ?? session?.serverUrl ?? "";

@@ -89,7 +89,24 @@ describe("envelope Uazapi", () => {
   it("traduz a desconexão pela API para STOPPED", () => {
     expect(lerEnvelopeUazapi(fixture("connection-disconnected"))).toEqual({
       ok: true,
-      event: { kind: "connection", status: "STOPPED" },
+      // `owner` sem número de verdade e conexão caída: nada de número.
+      event: { kind: "connection", status: "STOPPED", phoneNumber: null, displayName: null },
+    });
+  });
+
+  it("o evento de número CONECTADO traz o número em `owner`, na raiz (payload real)", () => {
+    expect(lerEnvelopeUazapi(fixture("connection-connected"))).toEqual({
+      ok: true,
+      event: { kind: "connection", status: "WORKING", phoneNumber: "5511900000001", displayName: null },
+    });
+  });
+
+  it("com o QR na tela (`connecting`), o `owner` não vale como número", () => {
+    const raw = JSON.parse(fixture("connection-connected"));
+    raw.instance.status = "connecting";
+    expect(lerEnvelopeUazapi(JSON.stringify(raw))).toMatchObject({
+      ok: true,
+      event: { kind: "connection", status: "SCAN_QR_CODE", phoneNumber: null },
     });
   });
 
@@ -269,7 +286,11 @@ describe("envelope Uazapi", () => {
       lerEnvelopeUazapi(
         JSON.stringify({ EventType: "connection", instance: { status: remoteStatus } }),
       ),
-    ).toEqual({ ok: true, event: { kind: "connection", status } });
+    ).toEqual({
+      ok: true,
+      // Sem `owner`, nenhum estado traz número.
+      event: { kind: "connection", status, phoneNumber: null, displayName: null },
+    });
   });
 
   it("recusa mensagem sem direção booleana e aceita só IDs de ACK válidos", () => {

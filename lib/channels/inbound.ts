@@ -371,6 +371,53 @@ export function mensagemDaEntradaAceita(rawBody: string): ZernioInboundMessage |
   return parseZernioInbound(leitura.envelope);
 }
 
+/**
+ * O número e o nome do aparelho que acabou de conectar, pelo evento de conexão.
+ *
+ * Sem isto o número só entrava pela consulta de estado da tela — e a tela para de
+ * consultar assim que vê `WORKING`. Medido na instalação de teste (2026-11-17): o
+ * webhook gravou `WORKING` antes da consulta seguinte, a tela parou, e a conexão
+ * ficou "conectada" sem número (o aviso da Central não diz QUAL caiu, e a trava
+ * de número único não pega o mesmo aparelho ligado em outro canal).
+ *
+ * Só dígitos, como a leitura de estado grava. O nome só preenche vazio: o
+ * operador pode ter renomeado a conexão. Número já ativo em outro canal da
+ * organização (23505 da trava) não derruba o evento — a tela de estado nomeia o
+ * conflito (`phone_number_conflict`), e aqui o número simplesmente não entra.
+ */
+async function gravarNumeroDaConexao(
+  admin: SupabaseClient,
+  session: InboundWebhookInput["session"],
+  evento: { status: string; phoneNumber: string | null; displayName: string | null },
+): Promise<void> {
+  if (evento.status !== "WORKING") return;
+  const patch: Record<string, string> = {};
+  if (evento.phoneNumber && evento.phoneNumber !== session.phone_number) patch.phone_number = evento.phoneNumber;
+  if (evento.displayName && !session.display_name?.trim()) patch.display_name = evento.displayName;
+  if (Object.keys(patch).length === 0) return;
+
+  const gravar = (corpo: Record<string, string>) =>
+    admin
+      .from("channel_sessions")
+      .update(corpo)
+      .eq("organization_id", session.organization_id)
+      .eq("id", session.id)
+      .eq("provider", CHANNEL_PROVIDER_UAZAPI)
+      .is("archived_at", null);
+  const { error } = await gravar(patch);
+  if (!error) return;
+  if (error.code !== "23505" || !patch.phone_number) throw new Error("uazapi_connection_phone_update_failed");
+  logger.warn("canal hospedado: o número conectado já está ativo em outro canal da organização", {
+    organization_id: session.organization_id,
+    channel_session_id: session.id,
+  });
+  const { phone_number: _conflito, ...semNumero } = patch;
+  if (Object.keys(semNumero).length > 0) {
+    const { error: deNovo } = await gravar(semNumero);
+    if (deNovo) throw new Error("uazapi_connection_phone_update_failed");
+  }
+}
+
 /** Eventos da instância hospedada: credencial do caminho resolve a sessão. */
 async function uazapiInbound(
   admin: SupabaseClient,
@@ -400,6 +447,7 @@ async function uazapiInbound(
       .is("archived_at", null)
       .or(`status.is.null,status.neq.${evento.status}`);
     if (error) throw new Error("uazapi_connection_update_failed");
+    await gravarNumeroDaConexao(admin, input.session, evento);
     await sincronizarSaudeDaConexao(
       admin,
       {

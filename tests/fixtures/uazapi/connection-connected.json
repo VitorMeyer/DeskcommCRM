@@ -1,0 +1,11 @@
+{
+  "BaseUrl": "https://exemplo.invalid",
+  "EventType": "connection",
+  "event_id": "00000000-0000-4000-8000-000000000001",
+  "instance": {
+    "name": "instancia-de-teste",
+    "status": "connected"
+  },
+  "instanceName": "instancia-de-teste",
+  "owner": "5511900000001"
+}

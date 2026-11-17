@@ -180,6 +180,25 @@ describe("conexão", () => {
     expect(doFiltro(up, "or")).toContainEqual(["status.is.null,status.neq.STOPPED"]);
   });
 
+  it("conectou: grava o número que o evento traz (só dígitos), na sessão certa", async () => {
+    const r = await entrar(fixture("connection-connected"));
+    expect(r).toEqual({ ok: true, body: { status: "connection_updated", connection: "WORKING" } });
+    const [estado, numero] = atualizacoes("channel_sessions");
+    expect(estado!.payload).toMatchObject({ status: "WORKING" });
+    expect(numero!.payload).toEqual({ phone_number: "5511900000001" });
+    expect(Object.fromEntries(doFiltro(numero!, "eq").map(([c, v]) => [c, v]))).toMatchObject({
+      organization_id: "org-1",
+      id: "sess-1",
+      provider: "uazapi",
+    });
+    expect(doFiltro(numero!, "is")).toContainEqual(["archived_at", null]);
+  });
+
+  it("caiu: não mexe no número gravado", async () => {
+    await entrar(fixture("connection-disconnected"));
+    expect(atualizacoes("channel_sessions")).toHaveLength(1);
+  });
+
   it("só toca a sessão do próprio provider, da própria organização, não arquivada", async () => {
     await entrar(fixture("connection-disconnected"));
     const up = atualizacoes("channel_sessions")[0]!;

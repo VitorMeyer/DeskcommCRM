@@ -34,7 +34,18 @@ export type UazapiWebhookEvent =
       occurredAt: string | null;
     }
   | { kind: "revoked"; externalIds: string[] }
-  | { kind: "connection"; status: EstadoDoCanal }
+  | {
+      kind: "connection";
+      status: EstadoDoCanal;
+      /**
+       * O número da instância, só em dígitos — vem em `owner`, na RAIZ do evento
+       * (payload real, `connection-connected.json`), e só vale com o número
+       * conectado. `null` quando o evento não traz um número.
+       */
+      phoneNumber: string | null;
+      /** Nome do perfil do WhatsApp, quando o evento o traz. */
+      displayName: string | null;
+    }
   /** Mensagem de GRUPO: vai para `gravarMensagemDeGrupo`, nunca para o fluxo individual. */
   | { kind: "group"; entrada: EntradaDeGrupoUazapi }
   /** O texto de uma mensagem que JÁ existe mudou (`externalId` é o da original). */
@@ -118,10 +129,22 @@ export function lerEnvelopeUazapi(rawBody: string): UazapiEnvelopeResult {
     });
   }
   if (eventName === "connection") {
-    const status = estadoDoCanalUazapi(obj(root.instance)?.status);
-    return status
-      ? { ok: true, event: { kind: "connection", status } }
-      : { ok: false, reason: "contract_violation" };
+    const instancia = obj(root.instance);
+    const status = estadoDoCanalUazapi(instancia?.status);
+    if (!status) return { ok: false, reason: "contract_violation" };
+    // `owner` é o número do aparelho pareado. Antes de parear vem vazio, e só um
+    // evento de número CONECTADO o descreve — o mesmo critério da leitura de estado.
+    const digitos = str(root.owner)?.replace(/\D/g, "") ?? "";
+    const phoneNumber = status === "WORKING" && digitos.length >= 8 && digitos.length <= 15 ? digitos : null;
+    return {
+      ok: true,
+      event: {
+        kind: "connection",
+        status,
+        phoneNumber,
+        displayName: status === "WORKING" ? str(instancia?.profileName) : null,
+      },
+    };
   }
   if (eventName !== "messages")
     return { ok: true, event: { kind: "ignored", reason: "evento_sem_interesse" } };

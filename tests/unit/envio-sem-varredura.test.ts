@@ -140,7 +140,8 @@ describe("store.message busca pela PK e só cai no metadata se a PK não achar",
     expect(await pgSendLedger(db).message("org", "k")).toEqual({
       id: "k",
       status: "queued",
-      retryAfterAt: "2026-10-07T12:00:00Z",
+      // Normalizado na borda por `instanteDoBanco` (régua de data lida do banco).
+      retryAfterAt: "2026-10-07T12:00:00.000Z",
       retryable: false,
     });
     expect(db.sqls).toHaveLength(1);
@@ -188,7 +189,8 @@ describe("store.message busca pela PK e só cai no metadata se a PK não achar",
     expect(await supabaseSendLedger(sb).message("org", "k")).toEqual({
       id: "k",
       status: "queued",
-      retryAfterAt: "2026-10-07T12:00:00Z",
+      // Normalizado na borda por `instanteDoBanco` (régua de data lida do banco).
+      retryAfterAt: "2026-10-07T12:00:00.000Z",
       retryable: false,
     });
   });

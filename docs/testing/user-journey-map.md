@@ -4410,7 +4410,7 @@ celular faz o papel do cliente; (d) um grupo de teste com o número da empresa e
 | J69.22 `[P1]` | Trocar o token por o de OUTRA instância, com o número desconectado | a conexão continua sendo a mesma linha (histórico e acesso da IA preservados) | |
 | J69.23 `[P1]` | Remover a conexão | a aba volta ao formulário vazio; a instância continua no painel da uazapi; as conversas ficam no histórico | |
 | J69.24 `[P2]` | Desligar o módulo com a conexão ativa | a aba some; mensagens do cliente continuam chegando | |
-| J69.25 `[P1]` | Escolher estado e cidade em "Região do número" e aplicar | a região salva aparece como "Em uso"; a conexão segue conectada e passa a sair pela cidade no próximo ciclo; cidade fora do catálogo é recusada | |
+| J69.25 `[P1]` | Escolher estado e cidade em "Região do número" e aplicar | a região salva aparece como "Em uso"; a conexão segue conectada e passa a sair pela cidade no próximo ciclo; cidade fora do catálogo é recusada | PASS (2026-11-17, `683cb8b`): Lagoa Santa – MG aplicada pela tela e auditada; a instância passou a `proxy_managed_state=mg`, `proxy_managed_city=lagoasanta`, com modo `internal`, sem contingência e sem erro de teste, e continuou conectada. A recusa de cidade fora do catálogo foi provada só no teste da rota, porque a tela oferece apenas cidades do catálogo. O IP de saída da cidade não foi medido |
 
 Casos do dono do produto (a preencher): cada um com quem manda o quê, por onde, e o que deveria
 acontecer na tela — vira linha `J69.25+` nesta tabela e, quando der, teste automatizado com o

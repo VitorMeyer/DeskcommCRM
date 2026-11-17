@@ -33,8 +33,10 @@ export type ChannelProvider =
   | "telegram"
   /**
    * Sessão WhatsApp hospedada por instância (módulo `canal_uazapi`). A
-   * instância é do cliente, criada no painel do serviço; a conexão guarda URL
-   * e token cifrados. Ver `./adapters/uazapi.ts`.
+   * instância é do cliente, criada no painel do serviço, e a conexão guarda URL
+   * e token cifrados. Ver `./adapters/uazapi.ts`. Sem ponto e vírgula neste
+   * comentário: `tests/invariants/channel-provider-schema.test.ts` lê o tipo até o
+   * primeiro ponto e vírgula, e um deles aqui esconde o provider do invariante.
    */
   | "uazapi";
 

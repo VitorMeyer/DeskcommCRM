@@ -31,6 +31,9 @@ import {
 
 interface ConversaEmbed {
   bot_silenced_until: string | null;
+  is_group?: boolean | null;
+  group_chat_id?: string | null;
+  channel_session_id?: string | null;
   assignee_kind: string | null;
   /** `conversations.metadata` — o modo "IA com o dono" (#3967) mora aqui. */
   metadata: unknown;
@@ -60,7 +63,7 @@ export async function decidirElegibilidadeDaConversaViaSupabase(
   const { data, error } = await admin
     .from("conversations")
     .select(
-      "bot_silenced_until, assignee_kind, metadata, organizations:organization_id(status, settings), contacts:contact_id(force_human, ai_opt_out, ai_authorized_at, phone_number, social_identity, tags), channel_sessions:channel_session_id(metadata)",
+      "bot_silenced_until, assignee_kind, metadata, is_group, group_chat_id, channel_session_id, organizations:organization_id(status, settings), contacts:contact_id(force_human, ai_opt_out, ai_authorized_at, phone_number, social_identity, tags), channel_sessions:channel_session_id(metadata)",
     )
     .eq("organization_id", input.organizationId)
     .eq("id", input.conversationId)
@@ -72,6 +75,21 @@ export async function decidirElegibilidadeDaConversaViaSupabase(
   if (data == null) return null;
 
   const row = data as unknown as ConversaEmbed;
+  // A chave da IA do grupo mora numa tabela sem FK a partir da conversa (a
+  // chave é composta: sessão + `group_chat_id`), então não cabe no embed. Só
+  // conversa de grupo paga a segunda leitura; erro nela é exceção, como acima.
+  let grupoIaResponde: unknown = null;
+  if (row.is_group === true && row.group_chat_id && row.channel_session_id) {
+    const grupo = await admin
+      .from("channel_session_groups")
+      .select("ia_responde")
+      .eq("organization_id", input.organizationId)
+      .eq("channel_session_id", row.channel_session_id)
+      .eq("group_chat_id", row.group_chat_id)
+      .maybeSingle();
+    if (grupo.error) throw new Error(`elegibilidade: leitura do grupo falhou — ${grupo.error.message}`);
+    grupoIaResponde = (grupo.data as { ia_responde?: unknown } | null)?.ia_responde ?? null;
+  }
   const estado = montarEstadoDeElegibilidade({
     orgStatus: row.organizations?.status ?? null,
     canalDesativado: row.channel_sessions?.metadata?.["disabled"] ?? null,
@@ -81,6 +99,8 @@ export async function decidirElegibilidadeDaConversaViaSupabase(
     contactPhoneNumber: row.contacts?.phone_number ?? null,
     aiTestSocialIdentities: row.channel_sessions?.metadata?.["ai_test_social_identities"] ?? null,
     contactSocialIdentity: row.contacts?.social_identity ?? null,
+    conversaDeGrupo: row.is_group === true,
+    grupoIaResponde,
     forceHuman: row.contacts?.force_human ?? false,
     contactTags: row.contacts?.tags ?? null,
     orgSettings: row.organizations?.settings,

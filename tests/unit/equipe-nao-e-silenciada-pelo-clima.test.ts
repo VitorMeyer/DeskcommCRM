@@ -97,6 +97,7 @@ function estado(extra: Partial<EstadoDeElegibilidade> = {}): EstadoDeElegibilida
     aiAuthorizedAt: null,
     preGoLiveAtivo: false,
     numeroDeTesteAutorizado: false,
+    grupoComIaLiberada: false,
     agora: new Date("2026-10-20T12:00:00Z"),
     ttlMs: 21 * 24 * 60 * 60 * 1000,
     ...extra,

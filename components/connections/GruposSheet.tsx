@@ -431,6 +431,14 @@ export function GruposSheet({
                     </span>
                   </div>
                 )}
+                {/* A chave é a autorização do grupo, inclusive no modo de teste
+                    (`decidirElegibilidade`, seção "O grupo"): dito na tela, porque
+                    o cartão "Acesso da IA" fala só de números. */}
+                {g.enabled && g.iaResponde === true && (
+                  <p className="pl-1 text-xs text-muted-foreground">
+                    {t("Ligada, vale como autorização deste grupo: a IA responde aqui mesmo com o número em modo de teste.")}
+                  </p>
+                )}
               </li>
             ))}
           </ul>

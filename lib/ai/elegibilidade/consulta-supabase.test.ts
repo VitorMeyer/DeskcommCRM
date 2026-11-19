@@ -227,3 +227,76 @@ describe("decidirElegibilidadeDaConversaViaSupabase", () => {
     ).rejects.toThrow(/ai_authorized_at/);
   });
 });
+
+describe("conversa de grupo: a chave da IA do grupo é lida e autoriza (decisão de 2026-11-19)", () => {
+  /** Dublê que responde por tabela: a conversa e a linha do grupo são duas leituras. */
+  function adminPorTabela(respostas: Record<string, { data: unknown; error: { message: string } | null }>) {
+    const eqs: unknown[][] = [];
+    const from = vi.fn((tabela: string) => {
+      const chain = {
+        select: () => chain,
+        eq: (...args: unknown[]) => {
+          eqs.push([tabela, ...args]);
+          return chain;
+        },
+        maybeSingle: () => Promise.resolve(respostas[tabela]),
+      };
+      return chain;
+    });
+    return { client: { from } as never, from, eqs };
+  }
+  const grupo = linha({
+    is_group: true,
+    group_chat_id: "120363000000000000@g.us",
+    channel_session_id: "33333333-3333-4333-8333-333333333333",
+    channel_sessions: { metadata: { ai_gate: "allowlist", ai_gate_mode: "pre_go_live", ai_test_phone_numbers: [] } },
+  });
+  const input = { organizationId: ORG, conversationId: CONV, agora: AGORA, ttlMs: TTL };
+
+  it("modo de teste + grupo com a chave ligada: permite, e a leitura do grupo é por organização, sessão e grupo", async () => {
+    const { client, eqs } = adminPorTabela({
+      conversations: { data: grupo, error: null },
+      channel_session_groups: { data: { ia_responde: true }, error: null },
+    });
+    expect(await decidirElegibilidadeDaConversaViaSupabase(client, input)).toMatchObject({
+      permite: true,
+      motivo: "grupo_liberado",
+    });
+    expect(eqs).toEqual(
+      expect.arrayContaining([
+        ["channel_session_groups", "organization_id", ORG],
+        ["channel_session_groups", "channel_session_id", "33333333-3333-4333-8333-333333333333"],
+        ["channel_session_groups", "group_chat_id", "120363000000000000@g.us"],
+      ]),
+    );
+  });
+
+  it("chave desligada continua barrada; conversa individual nem lê a tabela de grupos", async () => {
+    const desligado = adminPorTabela({
+      conversations: { data: grupo, error: null },
+      channel_session_groups: { data: { ia_responde: false }, error: null },
+    });
+    expect(await decidirElegibilidadeDaConversaViaSupabase(desligado.client, input)).toMatchObject({
+      permite: false,
+      motivo: "fora_da_lista_de_teste",
+    });
+
+    const individual = adminPorTabela({
+      conversations: { data: { ...grupo, is_group: false }, error: null },
+      channel_session_groups: { data: { ia_responde: true }, error: null },
+    });
+    expect(await decidirElegibilidadeDaConversaViaSupabase(individual.client, input)).toMatchObject({
+      permite: false,
+    });
+    expect(individual.from).not.toHaveBeenCalledWith("channel_session_groups");
+  });
+
+  it("erro ao ler o grupo vira exceção (o chamador falha fechado)", async () => {
+    const { client } = adminPorTabela({
+      conversations: { data: grupo, error: null },
+      channel_session_groups: { data: null, error: { message: "indisponível" } },
+    });
+    await expect(decidirElegibilidadeDaConversaViaSupabase(client, input)).rejects.toThrow(/grupo/);
+  });
+});
+

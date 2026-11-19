@@ -21914,6 +21914,9 @@ export const DICIONARIO: Traducoes = {
   // PRD 07 — o WhatsApp hospedado (módulo `canal_uazapi`).
   // PRD 07 — região do número hospedado (proxy regional).
   "Região do número": { es: "Región del número" },
+  "Ligada, vale como autorização deste grupo: a IA responde aqui mesmo com o número em modo de teste.": {
+    es: "Activada, vale como autorización de este grupo: la IA responde aquí incluso con el número en modo de prueba.",
+  },
   "O WhatsApp vê o número saindo desta cidade. Escolha perto de onde o negócio atende.": { es: "WhatsApp ve el número saliendo de esta ciudad. Elige una cerca de donde atiende el negocio." },
   "A rota da região caiu e a conexão está usando uma rota de contingência.": { es: "La ruta de la región cayó y la conexión está usando una ruta de contingencia." },
   "A conexão usa um proxy próprio, configurado no painel do serviço.": { es: "La conexión usa un proxy propio, configurado en el panel del servicio." },

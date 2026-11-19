@@ -10,6 +10,7 @@ Estado: **CONFIRMADO por código e testes**, não um simulador de mensagens.
 - Números são cadastrados com DDI antes de existir contato/conversa. A lista é normalizada, deduplicada e reconhece a variante brasileira com/sem nono dígito.
 - Em teste, somente a lista do canal autoriza respostas automáticas. Formulário, campanha, automação ou devolução ao automático NÃO autorizam quem está fora dela.
 - Lista vazia bloqueia todos; remover um número bloqueia as próximas respostas automáticas. As mensagens recebidas e o atendimento manual continuam no Inbox.
+- **Grupos (decisão de 2026-11-19):** a lista olha o contato da conversa, e o contato de um grupo é o próprio grupo, sem telefone. Por isso, em teste, a chave **"Permitir que a IA responda neste grupo"** (Conexões › Grupos, `channel_session_groups.ia_responde`) é a autorização daquele grupo: ligada, a IA responde no grupo mesmo com a lista vazia, e qualquer participante aciona. A conversa individual de cada participante continua sob a lista. Os vetos que valem sempre (humano, opt-out, silêncio, canal desativado) não mudam. Vale nos dois pontos de checagem: a elegibilidade (`grupo_liberado`) e o sink de envio (`decidirPreGoLiveDoCanalViaSupabase` com `groupChatId`).
 - Abrir ao público desativa a restrição da lista sem apagá-la. O agente ainda precisa estar publicado/vinculado; opt-out, silêncio e atribuição humana continuam válidos.
 - Testes usam o WhatsApp real e têm os custos normais. O **Teste do agente** no editor continua sendo um fluxo separado, sem envio ao canal.
 

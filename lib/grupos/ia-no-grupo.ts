@@ -16,6 +16,13 @@
  * elegibilidade) continuam valendo normalmente — elas moram DEPOIS desta
  * decisão, no turno, e nada aqui as contorna.
  *
+ * Uma exceção, por decisão do dono do produto (2026-11-19): no gate de
+ * elegibilidade de canal FECHADO (modo de teste ou allowlist por origem), a
+ * chave ligada É a autorização do grupo. As réguas desses modos leem o contato
+ * da conversa, e o de um grupo nunca as cumpriria. Os vetos que valem sempre
+ * (humano, opt-out, silêncio, canal desativado) continuam valendo. Ver
+ * `lib/ai/elegibilidade/gate.ts`, seção "O grupo".
+ *
  * ─── Por que isto mora numa função de uma linha ───────────────────────────
  *
  * Porque a mesma régua é aplicada em DOIS lugares que não podem divergir: o

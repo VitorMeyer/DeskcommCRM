@@ -1,7 +1,7 @@
 /**
  * Ler o estado de elegibilidade de uma conversa via pool `pg` (o transporte do
- * agent-engine). Uma query, três tabelas: o modo do gate do canal, as travas do
- * contato, o silêncio da conversa.
+ * agent-engine). Uma query: o modo do gate do canal, as travas do contato, o
+ * silêncio da conversa e, em conversa de grupo, a chave da IA daquele grupo.
  *
  * O drain (decide ENFILEIRAR) e o turno (decide RODAR) chamam isto e passam o
  * resultado para `decidirElegibilidade` — a MESMA regra pura.
@@ -31,6 +31,9 @@ interface LinhaDeElegibilidade {
   contact_tags: string[] | null;
   /** `organizations.settings` — as listas moram em `.crm.internal_contact_tags` e `.crm.team_contact_tags`. */
   org_settings: unknown;
+  is_group: boolean | null;
+  /** `channel_session_groups.ia_responde` — nulo fora de grupo ou sem linha na fila. */
+  grupo_ia_responde: boolean | null;
 }
 
 /**
@@ -54,13 +57,19 @@ export async function decidirElegibilidadeDaConversa(
        ct.social_identity           as social_identity,
        ct.tags                      as contact_tags,
        o.status                     as org_status,
-       o.settings                   as org_settings
+       o.settings                   as org_settings,
+       cv.is_group                  as is_group,
+       g.ia_responde                as grupo_ia_responde
      from conversations cv
      join organizations o on o.id = cv.organization_id
      join contacts ct
        on ct.id = cv.contact_id and ct.organization_id = cv.organization_id
      join channel_sessions cs
        on cs.id = cv.channel_session_id and cs.organization_id = cv.organization_id
+     left join channel_session_groups g
+       on g.organization_id = cv.organization_id
+      and g.channel_session_id = cv.channel_session_id
+      and g.group_chat_id = cv.group_chat_id
      where cv.organization_id = $1 and cv.id = $2`,
     [input.organizationId, input.conversationId],
   );
@@ -76,6 +85,8 @@ export async function decidirElegibilidadeDaConversa(
     contactPhoneNumber: r.phone_number,
     aiTestSocialIdentities: r.channel_metadata?.ai_test_social_identities,
     contactSocialIdentity: r.social_identity,
+    conversaDeGrupo: r.is_group,
+    grupoIaResponde: r.grupo_ia_responde,
     forceHuman: r.force_human,
     contactTags: r.contact_tags,
     orgSettings: r.org_settings,

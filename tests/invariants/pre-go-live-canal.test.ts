@@ -106,3 +106,40 @@ describe("pré-go-live no banco que o self-host instala", () => {
     expect((await configurar("open", [])).rows[0].n).toBe(0);
   });
 });
+
+describe("grupo com a chave da IA ligada, no banco real (decisão de 2026-11-19)", () => {
+  it("o transporte pg lê `channel_session_groups.ia_responde` e só o grupo liberado passa no modo de teste", async () => {
+    // Canal próprio: o `describe` acima termina com o canal compartilhado arquivado.
+    const canalDoGrupo = randomUUID(), contatoDoGrupo = randomUUID(), conversaDoGrupo = randomUUID();
+    const contatoIndividual = randomUUID(), conversaIndividual = randomUUID();
+    const chat = "120363000000000001@g.us";
+    await pool.query(
+      "insert into channel_sessions(id,organization_id,waha_session_name,webhook_secret_encrypted) values($1::uuid,$2,$1::text,'\\x00')", [canalDoGrupo, org]);
+    expect((await pool.query("select fn_configurar_pre_go_live_canal($1,$2,$3,$4) as n", [org, canalDoGrupo, "pre_go_live", []])).rows[0].n).toBe(1);
+    await pool.query(
+      "insert into contacts(id,organization_id,name,display_name,source,source_metadata) values($1,$2,'Grupo','Grupo','whatsapp_group',jsonb_build_object('group_chat_id',$3::text))",
+      [contatoDoGrupo, org, chat]);
+    await pool.query(
+      "insert into conversations(id,organization_id,contact_id,channel_session_id,is_group,group_chat_id) values($1,$2,$3,$4,true,$5)",
+      [conversaDoGrupo, org, contatoDoGrupo, canalDoGrupo, chat]);
+    await pool.query("insert into contacts(id,organization_id,phone_number) values($1,$2,'+5511912345678')", [contatoIndividual, org]);
+    await pool.query("insert into conversations(id,organization_id,contact_id,channel_session_id) values($1,$2,$3,$4)", [conversaIndividual, org, contatoIndividual, canalDoGrupo]);
+    const decidirGrupo = () => decidirElegibilidadeDaConversa(pool, {
+      organizationId: org, conversationId: conversaDoGrupo, agora: new Date(), ttlMs: 86400000,
+    });
+
+    // Sem linha na fila de grupos: o LEFT JOIN traz nulo, e nulo não libera.
+    expect(await decidirGrupo()).toMatchObject({ permite: false, motivo: "fora_da_lista_de_teste" });
+    await pool.query(
+      "insert into channel_session_groups(organization_id,channel_session_id,group_chat_id,enabled,ia_responde,conversation_id) values($1,$2,$3,true,false,$4)",
+      [org, canalDoGrupo, chat, conversaDoGrupo]);
+    expect(await decidirGrupo()).toMatchObject({ permite: false, motivo: "fora_da_lista_de_teste" });
+    await pool.query("update channel_session_groups set ia_responde = true where organization_id=$1 and group_chat_id=$2", [org, chat]);
+    expect(await decidirGrupo()).toMatchObject({ permite: true, motivo: "grupo_liberado" });
+    // A conversa individual do mesmo canal não herda nada do grupo.
+    expect(await decidirElegibilidadeDaConversa(pool, {
+      organizationId: org, conversationId: conversaIndividual, agora: new Date(), ttlMs: 86400000,
+    })).toMatchObject({ permite: false, motivo: "fora_da_lista_de_teste" });
+  });
+});
+

@@ -61,3 +61,41 @@ describe("decidirPreGoLiveDoCanalViaSupabase", () => {
     expect(chain.eq).toHaveBeenCalledWith("id", input.channelSessionId);
   });
 });
+
+describe("envio para grupo no modo de teste (decisão de 2026-11-19)", () => {
+  const metadata = { ai_gate: "allowlist", ai_gate_mode: "pre_go_live", ai_test_phone_numbers: [] };
+  function adminPorTabela(grupo: { data: unknown; error: { message: string } | null }) {
+    const from = vi.fn((tabela: string) => {
+      const chain = {
+        select: () => chain,
+        eq: () => chain,
+        maybeSingle: () =>
+          Promise.resolve(tabela === "channel_session_groups" ? grupo : { data: { metadata }, error: null }),
+      };
+      return chain;
+    });
+    return { client: { from } as never, from };
+  }
+  const paraGrupo = { ...input, contactPhoneNumber: "", groupChatId: "120363000000000000@g.us" };
+
+  it("grupo com a chave da IA ligada passa; desligada, continua barrado", async () => {
+    await expect(
+      decidirPreGoLiveDoCanalViaSupabase(adminPorTabela({ data: { ia_responde: true }, error: null }).client, paraGrupo),
+    ).resolves.toEqual({ ativo: true, permite: true, motivo: "grupo_liberado" });
+    await expect(
+      decidirPreGoLiveDoCanalViaSupabase(adminPorTabela({ data: { ia_responde: false }, error: null }).client, paraGrupo),
+    ).resolves.toMatchObject({ permite: false, motivo: "fora_da_lista_de_teste" });
+  });
+
+  it("sem `groupChatId` a tabela de grupos nem é lida; erro nela é exceção", async () => {
+    const individual = adminPorTabela({ data: { ia_responde: true }, error: null });
+    await expect(decidirPreGoLiveDoCanalViaSupabase(individual.client, { ...input, contactPhoneNumber: "" })).resolves.toMatchObject({
+      permite: false,
+    });
+    expect(individual.from).not.toHaveBeenCalledWith("channel_session_groups");
+    await expect(
+      decidirPreGoLiveDoCanalViaSupabase(adminPorTabela({ data: null, error: { message: "fora" } }).client, paraGrupo),
+    ).rejects.toThrow(/grupo/);
+  });
+});
+

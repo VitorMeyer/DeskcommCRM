@@ -1262,6 +1262,7 @@ export async function sendMessageHandler(
     channelSessionId: c.channel_session_id,
     contactPhoneNumber: c.contacts?.phone_number ?? "",
     contactSocialIdentity: c.contacts?.social_identity ?? null,
+    groupChatId: c.is_group ? c.group_chat_id : null,
   }).catch(() => ({ permite: false, motivo: "pre_go_live_indisponivel" }));
   if (acessoAtual && !acessoAtual.permite) {
     const { data: updated, error } = await supabase.from("messages").update({

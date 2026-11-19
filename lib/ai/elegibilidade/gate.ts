@@ -35,8 +35,19 @@
  * telefone). No allowlist por origem, `contacts.ai_authorized_at` — carimbado
  * por uma origem elegível (webhook do Respondi, match de campanha, ação de
  * automação, retomada manual pela tela) e dentro da janela de validade.
+ *
+ * ─── O grupo ────────────────────────────────────────────────────────────────
+ *
+ * As duas réguas acima olham o CONTATO da conversa, e o contato de um grupo é o
+ * próprio grupo: sem telefone, sem identidade social, sem origem que o carimbe.
+ * Num canal fechado, nenhum grupo passaria nunca. Por decisão do dono do produto
+ * (2026-11-19), ligar "Permitir que a IA responda neste grupo"
+ * (`channel_session_groups.ia_responde`, #2729) É a autorização explícita daquele
+ * grupo, inclusive no modo de teste: quem liga escolheu o grupo pelo nome, e a
+ * chave nasce desligada. Os vetos que valem sempre continuam valendo antes dela.
  */
 import { AI_GATE_PRE_GO_LIVE, contatoPodeTestar } from "./pre-go-live";
+import { grupoLiberaIa } from "@/lib/grupos/ia-no-grupo";
 import { ehContatoInterno } from "@/lib/contacts/tags-internas";
 import { ehContatoDaEquipe } from "@/lib/contacts/tags-da-equipe";
 import { ehOperante } from "@/lib/organizacao/operante";
@@ -120,6 +131,13 @@ export interface EstadoDeElegibilidade {
    * `ai_test_social_identities`. O nome ficou o de quando só havia telefone.
    */
   numeroDeTesteAutorizado: boolean;
+  /**
+   * Conversa de GRUPO com a chave da IA ligada naquele grupo
+   * (`channel_session_groups.ia_responde`). Autoriza nos dois modos fechados
+   * (teste e por origem), porque as réguas deles leem o contato, e o de um
+   * grupo nunca as cumpriria. Ver o cabeçalho, seção "O grupo".
+   */
+  grupoComIaLiberada: boolean;
   /** Agora, injetável para teste. */
   agora: Date;
   /** Janela de validade da autorização (`AI_ALLOWLIST_TTL_DAYS` em ms). */
@@ -137,6 +155,7 @@ export type MotivoDeElegibilidade =
   | "contato_interno"
   | "fora_da_lista_de_teste"
   | "numero_de_teste"
+  | "grupo_liberado"
   | "sem_autorizacao"
   | "autorizacao_expirada"
   | "autorizado";
@@ -210,6 +229,12 @@ export function decidirElegibilidade(e: EstadoDeElegibilidade): DecisaoDeElegibi
     return { permite: true, motivo: "gate_aberto", bloqueioPorAllowlist: false };
   }
 
+  // A chave do grupo é a autorização dele nos dois modos fechados: as réguas
+  // abaixo leem o contato, e o de um grupo não tem telefone nem origem.
+  if (e.grupoComIaLiberada) {
+    return { permite: true, motivo: "grupo_liberado", bloqueioPorAllowlist: false };
+  }
+
   // No pré-go-live, a lista do canal é a ÚNICA autorização positiva. O carimbo
   // global do contato pode ter vindo de campanha/automação e não pode furar a
   // promessa de que o número ainda está fechado ao público.
@@ -280,6 +305,13 @@ export function montarEstadoDeElegibilidade(raw: {
   aiTestSocialIdentities?: unknown;
   /** `contacts.social_identity` — a identidade de Instagram/Facebook do contato. */
   contactSocialIdentity?: string | null;
+  /**
+   * `conversations.is_group` e o `channel_session_groups.ia_responde` daquele
+   * grupo, crus. Ausentes = conversa individual, sem a chave: quem não lê o
+   * grupo falha FECHADO (o grupo não passa), nunca aberto.
+   */
+  conversaDeGrupo?: unknown;
+  grupoIaResponde?: unknown;
   forceHuman: unknown;
   /** `contacts.tags` cru (array de `text[]`), para a régua de contato interno (#2353). */
   contactTags?: readonly string[] | null | undefined;
@@ -330,6 +362,7 @@ export function montarEstadoDeElegibilidade(raw: {
         { telefone: raw.contactPhoneNumber, identidadeSocial: raw.contactSocialIdentity },
         listasDeTeste,
       ),
+    grupoComIaLiberada: raw.conversaDeGrupo === true && grupoLiberaIa(raw.grupoIaResponde),
     agora: raw.agora,
     ttlMs: raw.ttlMs,
   };

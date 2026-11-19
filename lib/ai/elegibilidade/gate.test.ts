@@ -29,6 +29,7 @@ const base: EstadoDeElegibilidade = {
   aiAuthorizedAt: null,
   preGoLiveAtivo: false,
   numeroDeTesteAutorizado: false,
+  grupoComIaLiberada: false,
   agora: AGORA,
   ttlMs: 21 * DIA,
 };
@@ -468,5 +469,54 @@ describe("#3974 — conversa com dono: a IA continua barrada", () => {
     const d = decidirElegibilidade({ ...base, assigneeKind: "user", botSilencedUntil: null });
     expect(d.permite).toBe(false);
     expect(d.motivo).toBe("conversa_de_humano");
+  });
+});
+
+describe("grupo com a chave da IA ligada (decisão de 2026-11-19)", () => {
+  const teste = { ...base, modo: "allowlist" as const, preGoLiveAtivo: true };
+
+  it("no modo de teste com a lista vazia, o grupo liberado passa e o não liberado não", () => {
+    expect(decidirElegibilidade({ ...teste, grupoComIaLiberada: true })).toEqual({
+      permite: true,
+      motivo: "grupo_liberado",
+      bloqueioPorAllowlist: false,
+    });
+    expect(decidirElegibilidade(teste)).toMatchObject({ permite: false, motivo: "fora_da_lista_de_teste" });
+  });
+
+  it("no allowlist por origem, o grupo liberado passa sem `ai_authorized_at`", () => {
+    const porOrigem = { ...base, modo: "allowlist" as const, grupoComIaLiberada: true };
+    expect(decidirElegibilidade(porOrigem)).toMatchObject({ permite: true, motivo: "grupo_liberado" });
+  });
+
+  it("os vetos que valem sempre continuam ganhando da chave do grupo", () => {
+    const liberado = { ...teste, grupoComIaLiberada: true };
+    expect(decidirElegibilidade({ ...liberado, forceHuman: true }).motivo).toBe("force_human");
+    expect(decidirElegibilidade({ ...liberado, canalDesativado: true }).motivo).toBe("canal_desativado");
+    expect(decidirElegibilidade({ ...liberado, botSilencedUntil: Infinity }).motivo).toBe("conversa_silenciada");
+  });
+
+  it("montar: só conversa de grupo com `ia_responde === true` libera; o resto falha fechado", () => {
+    const cru = {
+      aiGate: "allowlist",
+      aiGateMode: "pre_go_live",
+      orgStatus: "active",
+      forceHuman: false,
+      aiOptOut: false,
+      assigneeKind: "ai",
+      metadataDaConversa: null,
+      botSilencedUntil: null,
+      aiAuthorizedAt: null,
+      agora: AGORA,
+      ttlMs: 21 * DIA,
+    };
+    const liberado = (over: Record<string, unknown>) =>
+      montarEstadoDeElegibilidade({ ...cru, ...over }).grupoComIaLiberada;
+    expect(liberado({ conversaDeGrupo: true, grupoIaResponde: true })).toBe(true);
+    expect(liberado({ conversaDeGrupo: true, grupoIaResponde: false })).toBe(false);
+    expect(liberado({ conversaDeGrupo: true, grupoIaResponde: "true" })).toBe(false);
+    expect(liberado({ conversaDeGrupo: true, grupoIaResponde: null })).toBe(false);
+    expect(liberado({ conversaDeGrupo: false, grupoIaResponde: true })).toBe(false);
+    expect(liberado({})).toBe(false);
   });
 });

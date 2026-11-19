@@ -115,6 +115,7 @@ function iaCaladaEm(ate: Date, quando: Date): boolean {
     aiAuthorizedAt: null,
     preGoLiveAtivo: false,
     numeroDeTesteAutorizado: false,
+    grupoComIaLiberada: false,
     agora: quando,
     ttlMs: 21 * 24 * 60 * 60 * 1000,
   });

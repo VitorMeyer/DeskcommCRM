@@ -355,7 +355,12 @@ function lerAtualizacao(value: unknown): UazapiEnvelopeResult {
     : [];
   if (ids.length === 0) return { ok: false, reason: "contract_violation" };
 
-  const rawStatus = (str(event.state) ?? str(event.Type) ?? str(event.Status) ?? "").toLowerCase();
+  // Em grupo o recibo vem POR PARTICIPANTE (`Type: "GroupReceipts"`, com
+  // `Receipts[].state`), sem `state` no evento — medido ao vivo em 2026-11-19.
+  // Vale o mais avançado da lista, a régua do canal por QR (o tique anda no
+  // primeiro aviso de qualquer participante); o banco só deixa andar para a frente.
+  const recibo = reciboMaisAvancado(event.Receipts);
+  const rawStatus = (str(event.state) ?? recibo?.estado ?? str(event.Type) ?? str(event.Status) ?? "").toLowerCase();
   // Apagar para todos gera `messages_update` com o estado "Deleted" (contrato da
   // API). É o único desfecho que não é tique: a linha continua, marcada apagada.
   if (rawStatus.includes("delet")) return { ok: true, event: { kind: "revoked", externalIds: ids } };
@@ -372,10 +377,29 @@ function lerAtualizacao(value: unknown): UazapiEnvelopeResult {
         : rawStatus === "sent"
           ? "sent"
         : null;
-  const occurredAt = timestampIso(event.Timestamp ?? event.timestamp);
+  const occurredAt = timestampIso(event.Timestamp ?? event.timestamp ?? recibo?.timestamp);
   return status
     ? { ok: true, event: { kind: "status", externalIds: ids, status, occurredAt } }
     : { ok: true, event: { kind: "ignored", reason: "estado_sem_interesse" } };
+}
+
+const ORDEM_DO_RECIBO: readonly [RegExp, number][] = [
+  [/read|played/, 2],
+  [/deliver/, 1],
+];
+
+/** O recibo de participante mais avançado (lida > entregue), ou `null` sem nenhum conhecido. */
+function reciboMaisAvancado(value: unknown): { estado: string; timestamp: unknown } | null {
+  if (!Array.isArray(value)) return null;
+  let melhor: { estado: string; timestamp: unknown; peso: number } | null = null;
+  for (const item of value) {
+    const recibo = obj(item);
+    const estado = str(recibo?.state);
+    if (!recibo || !estado) continue;
+    const peso = ORDEM_DO_RECIBO.find(([padrao]) => padrao.test(estado.toLowerCase()))?.[1] ?? 0;
+    if (peso > 0 && (!melhor || peso > melhor.peso)) melhor = { estado, timestamp: recibo.timestamp, peso };
+  }
+  return melhor ? { estado: melhor.estado, timestamp: melhor.timestamp } : null;
 }
 
 /**

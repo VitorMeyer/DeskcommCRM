@@ -21,3 +21,8 @@ Os ids de mensagem (`AC…`) foram mantidos: são o que liga a edição e a rea�
 instância de teste do dono (2026-11-17), com número, nome, ids e URLs trocados.
 A resposta real de `GET /instance/status` traz `status.jid` como texto
 (`"<número>:<aparelho>@s.whatsapp.net"`), não o objeto `{ user }` da especificação v2.6.9.
+
+`messages-update-grupo-delivered.json` e `messages-update-grupo-read.json` têm a FORMA
+dos recibos de grupo lidos na instância de teste do dono (2026-11-19): em grupo, o
+`messages_update` vem com `Type: "GroupReceipts"` e o estado POR PARTICIPANTE em
+`Receipts[].state`, sem `state` no evento. Números, ids e o id da mensagem foram trocados.

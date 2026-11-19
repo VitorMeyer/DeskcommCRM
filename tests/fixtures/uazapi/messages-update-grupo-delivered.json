@@ -1,0 +1,24 @@
+{
+  "BaseUrl": "https://example.invalid",
+  "EventType": "messages_update",
+  "event": {
+    "Chat": "120363000000000001@g.us",
+    "IsFromMe": false,
+    "IsGroup": true,
+    "MessageIDs": ["3EB0TESTGROUPRECEIPT01"],
+    "Receipts": [
+      {
+        "participant": "5511900000002@s.whatsapp.net",
+        "participant_pn": "5511900000002@s.whatsapp.net",
+        "participant_lid": "900000000000002@lid",
+        "state": "Delivered",
+        "timestamp": 1790553400
+      }
+    ],
+    "Type": "GroupReceipts",
+    "chatid": "120363000000000001@g.us"
+  },
+  "instanceName": "uazapi-spike",
+  "owner": "test-owner",
+  "type": "GroupReceipts"
+}

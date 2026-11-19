@@ -136,3 +136,39 @@ describe("eventos de grupo (entrar/sair)", () => {
     });
   });
 });
+
+describe("recibo de mensagem nossa num grupo (`GroupReceipts`, lido ao vivo em 2026-11-19)", () => {
+  it("o estado vem por participante e vira o tique da mensagem: entregue, depois lida", () => {
+    expect(lerEnvelopeUazapi(fixture("messages-update-grupo-delivered"))).toEqual({
+      ok: true,
+      event: {
+        kind: "status",
+        externalIds: ["3EB0TESTGROUPRECEIPT01"],
+        status: "delivered",
+        occurredAt: new Date(1790553400 * 1000).toISOString(),
+      },
+    });
+    expect(lerEnvelopeUazapi(fixture("messages-update-grupo-read"))).toMatchObject({
+      ok: true,
+      event: { kind: "status", externalIds: ["3EB0TESTGROUPRECEIPT01"], status: "read" },
+    });
+  });
+
+  it("vários participantes: vale o mais avançado; lista sem estado conhecido continua ignorada", () => {
+    const base = JSON.parse(fixture("messages-update-grupo-delivered")) as {
+      event: { Receipts: Record<string, unknown>[] };
+    };
+    const [primeiro] = base.event.Receipts;
+    base.event.Receipts = [primeiro!, { ...primeiro!, state: "Read", timestamp: 1790553500 }];
+    expect(lerEnvelopeUazapi(JSON.stringify(base))).toMatchObject({
+      ok: true,
+      event: { kind: "status", status: "read", occurredAt: new Date(1790553500 * 1000).toISOString() },
+    });
+    base.event.Receipts = [{ ...primeiro!, state: "Algo" }];
+    expect(lerEnvelopeUazapi(JSON.stringify(base))).toMatchObject({
+      ok: true,
+      event: { kind: "ignored", reason: "estado_sem_interesse" },
+    });
+  });
+});
+

@@ -18,6 +18,7 @@ vi.mock("@/lib/webhooks/secrets", () => ({
 }));
 
 import { salvarUazapiSession } from "@/lib/channels/uazapi/session";
+import { decryptWebhookSecret } from "@/lib/webhooks/secrets";
 
 type Op = {
   tabela: string;
@@ -58,7 +59,12 @@ function construtor(op: Op, resolver: (filtros: ((l: Record<string, unknown>) =>
     limit: () => b,
     select: () => b,
     single: () => Promise.resolve(resolver(filtros)),
-    maybeSingle: () => Promise.resolve(resolver(filtros)),
+    // Como o supabase-js: `maybeSingle` devolve UMA linha (ou null), não a lista.
+    maybeSingle: () =>
+      Promise.resolve(resolver(filtros)).then((r) => {
+        const res = r as { data: unknown; error: unknown };
+        return Array.isArray(res.data) ? { ...res, data: res.data[0] ?? null } : res;
+      }),
     then: (ok: (v: unknown) => unknown) => ok(resolver(filtros)),
   };
   return b;
@@ -308,5 +314,83 @@ describe("salvarUazapiSession", () => {
     const r = await salvarUazapiSession(admin, ENTRADA);
     expect(r).toEqual({ ok: false, motivo: "Token recusado pelo servidor." });
     expect(ops).toHaveLength(0);
+  });
+
+  describe("troca de instância: o webhook desta conexão sai da ANTERIOR (decisão de 2026-11-19)", () => {
+    const VELHA = "https://velha.example.test";
+    const ANTERIOR = {
+      ...LINHA_SALVA,
+      uazapi_instance_id: "inst-velha",
+      uazapi_server_url: VELHA,
+      uazapi_instance_token_encrypted: "enc:velho",
+      webhook_path_token: "caminho-velho",
+      status: "STOPPED",
+      phone_number: null,
+    };
+    const WEBHOOKS_DA_VELHA = [
+      { id: "w-nosso", url: "https://crm.example.test/api/v1/webhooks/channel/caminho-velho" },
+      { id: "w-deles", url: "https://automacao.example.test/hook" },
+    ];
+    /** O servidor novo responde como no `beforeEach`; o velho, com `respostaDaVelha`. */
+    function servidores(respostaDaVelha: (init?: RequestInit) => Response) {
+      fetchSpy.mockImplementation(async (url, init) => {
+        if (String(url).startsWith(VELHA)) return respostaDaVelha(init);
+        return !String(url).endsWith("/webhook") ? statusDaInstancia() : new Response("[]", { status: 200 });
+      });
+    }
+    const escritasNaVelha = () =>
+      fetchSpy.mock.calls
+        .filter(([url, init]) => String(url) === `${VELHA}/webhook` && init?.method === "POST")
+        .map(([, init]) => ({
+          corpo: JSON.parse(String(init?.body)) as Record<string, unknown>,
+          token: new Headers(init?.headers).get("token"),
+        }));
+
+    beforeEach(() => {
+      vi.mocked(decryptWebhookSecret).mockImplementation(async (_admin: unknown, valor: string) =>
+        valor === "enc:velho" ? "tok-velho" : null,
+      );
+    });
+
+    it("apaga SÓ o webhook desta conexão na anterior, com o token dela, e diz que apagou", async () => {
+      linhasExistentes = [{ ...ANTERIOR }];
+      servidores((init) =>
+        init?.method === "POST"
+          ? new Response("{}", { status: 200 })
+          : new Response(JSON.stringify(WEBHOOKS_DA_VELHA), { status: 200 }),
+      );
+      const r = await salvarUazapiSession(admin, ENTRADA);
+      expect(r).toMatchObject({ ok: true, webhookAnteriorRemovido: true });
+      expect(ops.find((o) => o.op === "update")?.payload).toMatchObject({ uazapi_instance_id: "inst-1" });
+      expect(escritasNaVelha()).toEqual([{ corpo: { action: "delete", id: "w-nosso" }, token: "tok-velho" }]);
+    });
+
+    it("gravação recusada: a anterior NÃO perde o webhook (a remoção vem depois de salvar)", async () => {
+      linhasExistentes = [{ ...ANTERIOR }];
+      erroDaGravacao = { code: "XX000", message: "falhou" };
+      servidores(() => new Response(JSON.stringify(WEBHOOKS_DA_VELHA), { status: 200 }));
+      const r = await salvarUazapiSession(admin, ENTRADA);
+      expect(r.ok).toBe(false);
+      expect(escritasNaVelha()).toEqual([]);
+    });
+
+    it("anterior com o token morto (401): a troca fica salva e o webhook é dado como não removido", async () => {
+      linhasExistentes = [{ ...ANTERIOR }];
+      servidores(() => new Response("{}", { status: 401 }));
+      const r = await salvarUazapiSession(admin, ENTRADA);
+      expect(r).toMatchObject({ ok: true, webhookAnteriorRemovido: false });
+      expect(ops.some((o) => o.op === "update")).toBe(true);
+    });
+
+    it("a MESMA instância e a conexão nova não mexem em instância anterior nenhuma", async () => {
+      linhasExistentes = [{ ...LINHA_SALVA, uazapi_instance_token_encrypted: "enc:velho" }];
+      expect(await salvarUazapiSession(admin, ENTRADA)).toMatchObject({ ok: true, webhookAnteriorRemovido: null });
+      linhasExistentes = [];
+      expect(await salvarUazapiSession(admin, ENTRADA)).toMatchObject({ ok: true, webhookAnteriorRemovido: null });
+      const deletes = fetchSpy.mock.calls.filter(
+        ([, init]) => init?.method === "POST" && String(init?.body).includes('"delete"'),
+      );
+      expect(deletes).toEqual([]);
+    });
   });
 });

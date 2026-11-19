@@ -6,9 +6,14 @@ import { encryptWebhookSecret } from "@/lib/webhooks/secrets";
 
 import { CHANNEL_PROVIDER_UAZAPI } from "../capabilities";
 import { queryTolerantToMissingArchived, ARCHIVED_AT } from "../archived";
+import { resolveUazapiCreds } from "./credentials";
 import { requisitarNo } from "./http";
 import { validarCredenciaisUazapi } from "./validate-credentials";
-import { registrarWebhookDaConexao } from "./webhook-remoto";
+import {
+  caminhoDaConexao,
+  registrarWebhookDaConexao,
+  removerWebhookDaConexao,
+} from "./webhook-remoto";
 
 export interface UazapiSessionSummary {
   id: string;
@@ -93,6 +98,13 @@ export async function findUazapiSession(
  * Trocar de instância com o número conectado é recusado: a troca derrubaria o
  * atendimento em silêncio. Quem opera desconecta primeiro — e desconectar não
  * depende do token antigo estar vivo.
+ *
+ * Na troca de instância, o webhook desta conexão sai da ANTERIOR (decisão do dono,
+ * 2026-11-19): o caminho de entrada gira a cada gravação, então o que ficasse lá
+ * apontaria para um endereço morto. É melhor esforço e roda depois de salvar — o
+ * motivo mais comum da troca é a instância anterior ter expirado, com o token
+ * morto. `webhookAnteriorRemovido` é `null` fora da troca. Remover a conexão NÃO
+ * tira o webhook: reconectar a mesma instância reaproveita o que está lá.
  */
 export async function salvarUazapiSession(
   admin: SupabaseClient,
@@ -104,7 +116,10 @@ export async function salvarUazapiSession(
     webhookUrl: string;
     basePublicUrl: string;
   },
-): Promise<{ ok: true; session: UazapiSessionSummary } | { ok: false; motivo: string }> {
+): Promise<
+  | { ok: true; session: UazapiSessionSummary; webhookAnteriorRemovido: boolean | null }
+  | { ok: false; motivo: string }
+> {
   const validacao = await validarCredenciaisUazapi({
     serverUrl: input.serverUrl,
     token: input.token,
@@ -122,6 +137,14 @@ export async function salvarUazapiSession(
     };
   }
   const existente = ativa;
+  // A credencial da anterior é lida AGORA: a gravação abaixo a sobrescreve.
+  const anterior =
+    existente && outraInstancia && existente.instanceId
+      ? await resolveUazapiCreds(admin, {
+          organizationId: input.organizationId,
+          instanceId: existente.instanceId,
+        }).catch(() => null)
+      : null;
 
   const tokenEncrypted = await encryptWebhookSecret(admin, input.token.trim());
   // O endpoint de entrada usa o token de caminho opaco como autenticação. A
@@ -205,9 +228,17 @@ export async function salvarUazapiSession(
   }
 
   const session = resumo(saved.data as unknown as Record<string, unknown>, input.basePublicUrl);
-  return session
-    ? { ok: true, session }
-    : { ok: false, motivo: "Não foi possível ler a conexão salva." };
+  if (!session) return { ok: false, motivo: "Não foi possível ler a conexão salva." };
+
+  const webhookAnteriorRemovido = anterior?.webhookPathToken
+    ? await removerWebhookDaConexao(
+        requisitarNo({ serverUrl: anterior.serverUrl, token: anterior.token }),
+        caminhoDaConexao(anterior.webhookPathToken),
+      )
+    : outraInstancia && existente
+      ? false
+      : null;
+  return { ok: true, session, webhookAnteriorRemovido };
 }
 
 /**

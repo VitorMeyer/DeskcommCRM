@@ -4418,7 +4418,8 @@ payload real capturado.
 
 Fora deste roteiro, conhecido: (1) remover a conexão gira o endereço de entrada, mas o webhook
 antigo do CRM fica na instância apontando para um endereço que responde 404 até a próxima conexão
-(que o reaproveita); (2) o limite temporário do WhatsApp (erro 463) não é provocável sob comando —
+(que o reaproveita) — decisão do dono em 2026-11-19; na TROCA de instância (J69.22) o CRM apaga o
+próprio webhook da anterior; (2) o limite temporário do WhatsApp (erro 463) não é provocável sob comando —
 registrar se acontecer; (3) uma sessão parada não religa sozinha.
 
 ## E-mail da organização — conta e domínio (#3443 + #3464)

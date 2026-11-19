@@ -90,7 +90,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     resourceType: "channel_session",
     resourceId: result.session.id,
     requestId,
-    metadata: { etapa: "credencial", phone_number: result.session.phoneNumber },
+    metadata: {
+      etapa: "credencial",
+      phone_number: result.session.phoneNumber,
+      // Só na troca de instância: o webhook desta conexão saiu da anterior?
+      ...(typeof result.webhookAnteriorRemovido !== "boolean"
+        ? {}
+        : { webhook_da_instancia_anterior: result.webhookAnteriorRemovido ? "removido" : "nao_removido" }),
+    },
   });
   return ok({ connected: true, session: result.session }, { requestId, status: 201 });
 }
